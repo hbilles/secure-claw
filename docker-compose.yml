@@ -1,0 +1,32 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: packages/gateway/Dockerfile
+    volumes:
+      - socket-vol:/tmp/sockets
+      - audit-data:/data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SOCKET_PATH=/tmp/sockets/secureclaw.sock
+      - AUDIT_DIR=/data/audit
+    restart: unless-stopped
+
+  bridge-telegram:
+    build:
+      context: .
+      dockerfile: packages/bridge-telegram/Dockerfile
+    volumes:
+      - socket-vol:/tmp/sockets
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
+      - SOCKET_PATH=/tmp/sockets/secureclaw.sock
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  socket-vol:
+  audit-data:
