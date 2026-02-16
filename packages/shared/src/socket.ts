@@ -99,6 +99,13 @@ export class SocketServer extends EventEmitter {
       });
 
       this.server.listen(this.socketPath, () => {
+        // Make the socket accessible to all users so that other containers
+        // (running as different UIDs) can connect to it via the shared volume.
+        try {
+          fs.chmodSync(this.socketPath, 0o777);
+        } catch {
+          // Non-fatal — may fail on some platforms
+        }
         console.log(`[socket-server] Listening on ${this.socketPath}`);
         resolve();
       });

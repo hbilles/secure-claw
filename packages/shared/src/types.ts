@@ -20,11 +20,17 @@ export interface OutgoingMessage {
   replyToId?: string;                   // Optional: reply to specific message
 }
 
-/** Session — conversation state */
+/**
+ * Session — conversation state.
+ *
+ * Messages can contain simple text or complex content blocks (e.g., tool use).
+ * The `content` field is typed as `unknown` to support Anthropic's message
+ * format (string | ContentBlock[]) without coupling to the Anthropic SDK.
+ */
 export interface Session {
   id: string;
   userId: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: unknown }>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -32,9 +38,26 @@ export interface Session {
 /** Audit log entry */
 export interface AuditEntry {
   timestamp: Date;
-  type: 'message_received' | 'llm_request' | 'llm_response' | 'message_sent' | 'error';
+  type:
+    | 'message_received'
+    | 'llm_request'
+    | 'llm_response'
+    | 'message_sent'
+    | 'error'
+    | 'tool_call'
+    | 'tool_result';
   sessionId: string;
   data: Record<string, unknown>;
+}
+
+/** Executor result — returned by sandboxed executor containers */
+export interface ExecutorResult {
+  success: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  error?: string;
 }
 
 /** Socket request — bridge sends this to gateway */

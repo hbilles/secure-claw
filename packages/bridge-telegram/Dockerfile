@@ -5,9 +5,13 @@ WORKDIR /app
 # Copy root workspace files
 COPY package.json package-lock.json ./
 
-# Copy package.json files for workspace resolution
+# Copy package.json files for ALL workspace packages.
+# npm ci needs to see them all for lock file resolution.
 COPY packages/shared/package.json packages/shared/
 COPY packages/bridge-telegram/package.json packages/bridge-telegram/
+COPY packages/gateway/package.json packages/gateway/
+COPY packages/executor-shell/package.json packages/executor-shell/
+COPY packages/executor-file/package.json packages/executor-file/
 
 # Install all dependencies (including devDependencies for build)
 RUN npm ci --workspace=packages/shared --workspace=packages/bridge-telegram --include-workspace-root
@@ -31,11 +35,16 @@ WORKDIR /app
 # Copy root workspace files
 COPY package.json package-lock.json ./
 
-# Copy built output and package.json for each workspace package
+# Copy ALL workspace package.json files for npm ci resolution
+COPY packages/shared/package.json packages/shared/
+COPY packages/bridge-telegram/package.json packages/bridge-telegram/
+COPY packages/gateway/package.json packages/gateway/
+COPY packages/executor-shell/package.json packages/executor-shell/
+COPY packages/executor-file/package.json packages/executor-file/
+
+# Copy built output
 COPY --from=builder /app/packages/shared/dist/ packages/shared/dist/
-COPY --from=builder /app/packages/shared/package.json packages/shared/
 COPY --from=builder /app/packages/bridge-telegram/dist/ packages/bridge-telegram/dist/
-COPY --from=builder /app/packages/bridge-telegram/package.json packages/bridge-telegram/
 
 # Install production dependencies only
 RUN npm ci --omit=dev --workspace=packages/shared --workspace=packages/bridge-telegram --include-workspace-root

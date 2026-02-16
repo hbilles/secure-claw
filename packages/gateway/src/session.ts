@@ -2,16 +2,20 @@
  * In-memory session manager.
  *
  * - Keyed by userId
- * - Keeps the last 20 message pairs (40 messages) per session
+ * - Keeps the last 50 messages per session (increased from 40 to
+ *   accommodate tool-use message overhead)
  * - Expires sessions after 1 hour of inactivity
  * - Cleanup interval runs every 5 minutes
+ *
+ * Phase 2: messages now store complex content (tool_use / tool_result blocks)
+ * in addition to simple text strings. The `content` field is typed as `unknown`
+ * to support Anthropic's message format without coupling to the SDK types.
  */
 
 import { randomUUID } from 'node:crypto';
 import type { Session } from '@secureclaw/shared';
 
-const MAX_MESSAGE_PAIRS = 20;
-const MAX_MESSAGES = MAX_MESSAGE_PAIRS * 2;
+const MAX_MESSAGES = 50;
 const SESSION_TTL_MS = 60 * 60 * 1000;       // 1 hour
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;   // 5 minutes
 
@@ -45,7 +49,7 @@ export class SessionManager {
   }
 
   /** Append a message to the user's session and trim to max length. */
-  append(userId: string, role: 'user' | 'assistant', content: string): Session {
+  append(userId: string, role: 'user' | 'assistant', content: unknown): Session {
     const session = this.getOrCreate(userId);
     session.messages.push({ role, content });
 
@@ -56,6 +60,22 @@ export class SessionManager {
 
     session.updatedAt = new Date();
     return session;
+  }
+
+  /**
+   * Replace the full messages array for a session.
+   * Used by the orchestrator after a tool-use loop completes.
+   */
+  setMessages(userId: string, messages: Array<{ role: 'user' | 'assistant'; content: unknown }>): void {
+    const session = this.getOrCreate(userId);
+    session.messages = messages;
+
+    // Trim to keep last MAX_MESSAGES messages
+    if (session.messages.length > MAX_MESSAGES) {
+      session.messages = session.messages.slice(-MAX_MESSAGES);
+    }
+
+    session.updatedAt = new Date();
   }
 
   /** Get a session by userId (may be undefined). */

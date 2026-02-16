@@ -5,9 +5,14 @@ WORKDIR /app
 # Copy root workspace files
 COPY package.json package-lock.json ./
 
-# Copy package.json files for workspace resolution
+# Copy package.json files for ALL workspace packages.
+# npm ci needs to see them all for lock file resolution,
+# even though we only build shared + gateway here.
 COPY packages/shared/package.json packages/shared/
 COPY packages/gateway/package.json packages/gateway/
+COPY packages/bridge-telegram/package.json packages/bridge-telegram/
+COPY packages/executor-shell/package.json packages/executor-shell/
+COPY packages/executor-file/package.json packages/executor-file/
 
 # Install all dependencies (including devDependencies for build)
 RUN npm ci --workspace=packages/shared --workspace=packages/gateway --include-workspace-root
@@ -31,11 +36,16 @@ WORKDIR /app
 # Copy root workspace files
 COPY package.json package-lock.json ./
 
-# Copy built output and package.json for each workspace package
+# Copy ALL workspace package.json files for npm ci resolution
+COPY packages/shared/package.json packages/shared/
+COPY packages/gateway/package.json packages/gateway/
+COPY packages/bridge-telegram/package.json packages/bridge-telegram/
+COPY packages/executor-shell/package.json packages/executor-shell/
+COPY packages/executor-file/package.json packages/executor-file/
+
+# Copy built output
 COPY --from=builder /app/packages/shared/dist/ packages/shared/dist/
-COPY --from=builder /app/packages/shared/package.json packages/shared/
 COPY --from=builder /app/packages/gateway/dist/ packages/gateway/dist/
-COPY --from=builder /app/packages/gateway/package.json packages/gateway/
 
 # Install production dependencies only
 RUN npm ci --omit=dev --workspace=packages/shared --workspace=packages/gateway --include-workspace-root
@@ -44,7 +54,13 @@ RUN npm ci --omit=dev --workspace=packages/shared --workspace=packages/gateway -
 RUN mkdir -p /data/audit && chown -R app:app /data
 RUN mkdir -p /tmp/sockets && chown app:app /tmp/sockets
 
-# Switch to non-root user
+# ⚠️  Docker socket access:
+# The Gateway needs /var/run/docker.sock for executor container management.
+# This is the ONE privileged operation in the entire system.
+# On macOS (Docker Desktop), the socket is world-accessible.
+# On Linux, you may need to add the app user to the docker group
+# or override the user in docker-compose.yml with:
+#   user: "0:0"  # or group_add: [docker]
 USER app
 
 EXPOSE 0

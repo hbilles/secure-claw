@@ -3,13 +3,29 @@ services:
     build:
       context: .
       dockerfile: packages/gateway/Dockerfile
+    # ⚠️  PRIVILEGED: The gateway runs as root inside its container so it
+    # can access /var/run/docker.sock for executor container management.
+    # This is the ONE privileged operation in the entire system. The real
+    # security boundary is the executor containers (cap-drop=ALL, no-network,
+    # non-root, scoped mounts).
+    user: "0:0"
     volumes:
       - socket-vol:/tmp/sockets
       - audit-data:/data
+      # Mount the config file for runtime access
+      - ./config:/app/config:ro
+      # Docker socket access for executor container management
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - SOCKET_PATH=/tmp/sockets/secureclaw.sock
       - AUDIT_DIR=/data/audit
+      - CAPABILITY_SECRET=${CAPABILITY_SECRET}
+      - SECURECLAW_CONFIG=/app/config/secureclaw.yaml
+      # HOST_HOME tells the config loader the host machine's home directory
+      # so that ~ in secureclaw.yaml resolves to host paths (not container paths).
+      # This is critical because executor bind mounts reference the HOST filesystem.
+      - HOST_HOME=${HOME}
     restart: unless-stopped
 
   bridge-telegram:
@@ -26,6 +42,27 @@ services:
       gateway:
         condition: service_started
     restart: unless-stopped
+
+  # Executor images — built but NOT run as services.
+  # The Gateway creates these containers dynamically via the Dispatcher.
+  # Use `docker compose build` to build all images including executors.
+  # These use the "build" profile to exclude them from `docker compose up`.
+
+  executor-shell:
+    build:
+      context: .
+      dockerfile: packages/executor-shell/Dockerfile
+    image: secureclaw-executor-shell
+    profiles:
+      - build
+
+  executor-file:
+    build:
+      context: .
+      dockerfile: packages/executor-file/Dockerfile
+    image: secureclaw-executor-file
+    profiles:
+      - build
 
 volumes:
   socket-vol:

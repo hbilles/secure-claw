@@ -3,6 +3,10 @@
  *
  * File pattern: /data/audit/audit-YYYY-MM-DD.jsonl
  * Each line is a JSON-serialized AuditEntry.
+ *
+ * Phase 2 additions:
+ * - tool_call events (when a tool is invoked)
+ * - tool_result events (when a tool returns)
  */
 
 import * as fs from 'node:fs';
@@ -72,6 +76,26 @@ export class AuditLogger {
     this.log({
       timestamp: new Date(),
       type: 'message_sent',
+      sessionId,
+      data,
+    });
+  }
+
+  /** Convenience: log a tool_call event. */
+  logToolCall(sessionId: string, data: Record<string, unknown>): void {
+    this.log({
+      timestamp: new Date(),
+      type: 'tool_call',
+      sessionId,
+      data,
+    });
+  }
+
+  /** Convenience: log a tool_result event. */
+  logToolResult(sessionId: string, data: Record<string, unknown>): void {
+    this.log({
+      timestamp: new Date(),
+      type: 'tool_result',
       sessionId,
       data,
     });

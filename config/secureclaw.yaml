@@ -1,0 +1,65 @@
+# SecureClaw Configuration
+# Phase 2: Sandboxed tool execution via Docker containers
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  maxTokens: 4096
+
+executors:
+  shell:
+    image: secureclaw-executor-shell
+    memoryLimit: 512m
+    cpuLimit: 1
+    defaultTimeout: 60
+    defaultMaxOutput: 1048576  # 1MB
+
+  file:
+    image: secureclaw-executor-file
+    memoryLimit: 256m
+    cpuLimit: 0.5
+    defaultTimeout: 30
+    defaultMaxOutput: 5242880  # 5MB
+
+# Mount policies: what host directories are accessible, and how.
+# hostPath uses the Docker host's filesystem (~ is resolved at runtime).
+# containerPath is the path inside executor containers.
+mounts:
+  - name: projects
+    hostPath: ~/projects
+    containerPath: /workspace
+    readOnly: false
+
+  - name: documents
+    hostPath: ~/Documents
+    containerPath: /documents
+    readOnly: true
+
+  - name: sandbox
+    hostPath: ~/secureclaw-sandbox
+    containerPath: /sandbox
+    readOnly: false
+
+# Action tiers — used in Phase 3 for HITL approval gates.
+# Defined here to establish the schema; all tools run immediately in Phase 2.
+actionTiers:
+  autoApprove:
+    - tool: read_file
+    - tool: list_directory
+    - tool: search_files
+    - tool: run_shell_command
+      conditions:
+        workingDirectory: /sandbox/*
+
+  notify:
+    - tool: write_file
+      conditions:
+        path: /sandbox/*
+
+  requireApproval:
+    - tool: write_file
+      conditions:
+        path: "!(/sandbox/*)"    # Anywhere outside sandbox
+    - tool: run_shell_command
+      conditions:
+        workingDirectory: "!(/sandbox/*)"
