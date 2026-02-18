@@ -198,6 +198,54 @@ export interface TaskStopResponse {
   sessionId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5: Heartbeat Scheduler Protocol
+// ---------------------------------------------------------------------------
+
+/** Heartbeat list request — bridge sends to gateway when user types /heartbeats */
+export interface HeartbeatListRequest {
+  type: 'heartbeat-list';
+  userId: string;
+  chatId: string;
+}
+
+/** Heartbeat list response — gateway sends to bridge with all heartbeats */
+export interface HeartbeatListResponse {
+  type: 'heartbeat-list-response';
+  chatId: string;
+  heartbeats: Array<{
+    name: string;
+    schedule: string;
+    prompt: string;
+    enabled: boolean;
+  }>;
+}
+
+/** Heartbeat toggle request — bridge sends to gateway to enable/disable */
+export interface HeartbeatToggleRequest {
+  type: 'heartbeat-toggle';
+  userId: string;
+  chatId: string;
+  name: string;
+  enabled: boolean;
+}
+
+/** Heartbeat toggle response — gateway sends to bridge confirming toggle */
+export interface HeartbeatToggleResponse {
+  type: 'heartbeat-toggle-response';
+  chatId: string;
+  name: string;
+  enabled: boolean;
+  success: boolean;
+}
+
+/** Heartbeat triggered — gateway sends to bridge when a heartbeat fires */
+export interface HeartbeatTriggered {
+  type: 'heartbeat-triggered';
+  chatId: string;
+  name: string;
+}
+
 /** Union of all gateway → bridge message types */
 export type GatewayToBridgeMessage =
   | SocketResponse
@@ -208,7 +256,11 @@ export type GatewayToBridgeMessage =
   | MemoryListResponse
   | MemoryDeleteResponse
   | SessionListResponse
-  | TaskStopResponse;
+  | TaskStopResponse
+  // Phase 5
+  | HeartbeatListResponse
+  | HeartbeatToggleResponse
+  | HeartbeatTriggered;
 
 /** Union of all bridge → gateway message types */
 export type BridgeToGatewayMessage =
@@ -217,4 +269,7 @@ export type BridgeToGatewayMessage =
   | MemoryListRequest
   | MemoryDeleteRequest
   | SessionListRequest
-  | TaskStopRequest;
+  | TaskStopRequest
+  // Phase 5
+  | HeartbeatListRequest
+  | HeartbeatToggleRequest;

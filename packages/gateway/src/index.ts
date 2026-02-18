@@ -5,12 +5,10 @@
  * manages sessions, routes tool calls through sandboxed containers,
  * and logs everything to the audit trail.
  *
- * Phase 3: Added the HITL approval gate. Tool calls are now classified
- * into tiers (auto-approve / notify / require-approval) based on config.
- * Dangerous actions require explicit user approval via Telegram inline buttons.
- *
- * Phase 4: Added persistent memory, memory-aware prompts, the Ralph Wiggum
- * loop for multi-step tasks, and bridge commands for memory/session management.
+ * Phase 3: HITL approval gate.
+ * Phase 4: Persistent memory, Ralph Wiggum loop.
+ * Phase 5: Web browsing, external services (Gmail, Calendar, GitHub),
+ *          heartbeat scheduler, web dashboard.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -28,6 +26,11 @@ import type {
   SessionListResponse,
   TaskStopResponse,
   TaskProgressUpdate,
+  HeartbeatListRequest,
+  HeartbeatListResponse,
+  HeartbeatToggleRequest,
+  HeartbeatToggleResponse,
+  HeartbeatTriggered,
 } from '@secureclaw/shared';
 import { SessionManager } from './session.js';
 import { AuditLogger } from './audit.js';
@@ -39,6 +42,13 @@ import { HITLGate } from './hitl-gate.js';
 import { MemoryStore } from './memory.js';
 import { PromptBuilder } from './prompt-builder.js';
 import { TaskLoop } from './loop.js';
+// Phase 5
+import { OAuthStore } from './services/oauth.js';
+import { GmailService } from './services/gmail.js';
+import { CalendarService } from './services/calendar.js';
+import { GitHubService } from './services/github.js';
+import { HeartbeatScheduler } from './scheduler.js';
+import { startDashboard, broadcastSSE } from './dashboard.js';
 
 // ---------------------------------------------------------------------------
 // Heuristic: Is a request "complex" enough for the Ralph Wiggum loop?
@@ -117,6 +127,37 @@ async function main(): Promise<void> {
   // Attach memory to the orchestrator
   orchestrator.setMemory(memoryStore, promptBuilder);
 
+  // Phase 5: Initialize OAuth store and external services
+  let oauthStore: OAuthStore | null = null;
+  let gmailService: GmailService | null = null;
+  let calendarService: CalendarService | null = null;
+  let githubService: GitHubService | null = null;
+
+  try {
+    oauthStore = new OAuthStore();
+
+    gmailService = new GmailService(oauthStore);
+    calendarService = new CalendarService(oauthStore);
+    githubService = new GitHubService(oauthStore, config.ownGitHubRepos);
+
+    orchestrator.setServices(gmailService, calendarService, githubService);
+
+    const connected: string[] = [];
+    if (gmailService.isConnected()) connected.push('Gmail');
+    if (calendarService.isConnected()) connected.push('Calendar');
+    if (githubService.isConnected()) connected.push('GitHub');
+
+    if (connected.length > 0) {
+      console.log(`[gateway] Connected services: ${connected.join(', ')}`);
+    } else {
+      console.log('[gateway] No external services connected (use /connect to set up)');
+    }
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.warn(`[gateway] OAuth store not available: ${error.message}`);
+    console.warn('[gateway] External services (Gmail, Calendar, GitHub) will be disabled');
+  }
+
   // Phase 4: Initialize the Ralph Wiggum task loop
   const sendProgress = (chatId: string, text: string) => {
     const progressMsg: TaskProgressUpdate = {
@@ -134,6 +175,71 @@ async function main(): Promise<void> {
     auditLogger,
     sendProgress,
   );
+
+  // Phase 5: Initialize the heartbeat scheduler
+  const heartbeatScheduler = new HeartbeatScheduler(async (name, prompt) => {
+    console.log(`[gateway] Heartbeat "${name}" fired, running prompt through orchestrator`);
+
+    // Use the first allowed user ID as the heartbeat user
+    const userId = process.env['ALLOWED_USER_IDS']?.split(',')[0]?.trim();
+    if (!userId) {
+      console.error('[gateway] No ALLOWED_USER_IDS set — cannot run heartbeat');
+      return;
+    }
+
+    // Get the chat ID (same as user ID for Telegram private chats)
+    const chatId = userId;
+    const session = sessionManager.getOrCreate(userId);
+
+    // Notify the bridge that a heartbeat is firing
+    const triggeredMsg: HeartbeatTriggered = {
+      type: 'heartbeat-triggered',
+      chatId,
+      name,
+    };
+    socketServer.broadcast(triggeredMsg);
+
+    try {
+      // Run the heartbeat prompt through the normal orchestrator
+      // (HITL approval still applies — heartbeats don't bypass the gate)
+      const result = await orchestrator.chat(
+        session.id,
+        [{ role: 'user', content: prompt }],
+        chatId,
+        userId,
+      );
+
+      // Send the result to the bridge
+      socketServer.broadcast({
+        type: 'notification',
+        chatId,
+        text: `⏰ *${name}*\n\n${result.text}`,
+      });
+
+      auditLogger.logMessageSent(session.id, {
+        heartbeat: name,
+        chatId,
+        contentLength: result.text.length,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      console.error(`[gateway] Heartbeat "${name}" error:`, error.message);
+      auditLogger.logError(session.id, {
+        heartbeat: name,
+        error: error.message,
+      });
+    }
+  });
+
+  if (config.heartbeats.length > 0) {
+    heartbeatScheduler.start(config.heartbeats);
+  }
+
+  // Phase 5: Start the web dashboard
+  const dashboardServer = startDashboard(auditLogger, memoryStore, approvalStore, config);
+
+  // Connect audit logger to dashboard SSE for live streaming
+  auditLogger.setOnLog((entry) => broadcastSSE('audit', entry));
 
   // Handle incoming messages from bridges
   socketServer.on('message', async (data: unknown, reply: (response: unknown) => void, clientId: string) => {
@@ -208,6 +314,38 @@ async function main(): Promise<void> {
         chatId: req.chatId,
         cancelled: sessionId !== null,
         sessionId: sessionId ?? undefined,
+      };
+      socketServer.broadcast(response);
+      return;
+    }
+
+    // --- Phase 5: Handle heartbeat commands from bridge ---
+    if (raw['type'] === 'heartbeat-list') {
+      const req = data as HeartbeatListRequest;
+      const heartbeats = heartbeatScheduler.list();
+      const response: HeartbeatListResponse = {
+        type: 'heartbeat-list-response',
+        chatId: req.chatId,
+        heartbeats: heartbeats.map((h) => ({
+          name: h.name,
+          schedule: h.schedule,
+          prompt: h.prompt,
+          enabled: h.enabled,
+        })),
+      };
+      socketServer.broadcast(response);
+      return;
+    }
+
+    if (raw['type'] === 'heartbeat-toggle') {
+      const req = data as HeartbeatToggleRequest;
+      const success = heartbeatScheduler.toggle(req.name, req.enabled);
+      const response: HeartbeatToggleResponse = {
+        type: 'heartbeat-toggle-response',
+        chatId: req.chatId,
+        name: req.name,
+        enabled: req.enabled,
+        success,
       };
       socketServer.broadcast(response);
       return;
@@ -408,11 +546,16 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async () => {
     console.log('[gateway] Shutting down...');
+    heartbeatScheduler.stop();
+    if (dashboardServer) {
+      dashboardServer.close();
+    }
     await socketServer.stop();
     sessionManager.dispose();
     auditLogger.close();
     approvalStore.close();
     memoryStore.close();
+    if (oauthStore) oauthStore.close();
     process.exit(0);
   };
 

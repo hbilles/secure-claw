@@ -26,6 +26,15 @@ services:
       # so that ~ in secureclaw.yaml resolves to host paths (not container paths).
       # This is critical because executor bind mounts reference the HOST filesystem.
       - HOST_HOME=${HOME}
+      # Phase 5: OAuth encryption key (for encrypted token storage)
+      - OAUTH_KEY=${OAUTH_KEY:-}
+      # Phase 5: Heartbeat user (first allowed user ID)
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
+    ports:
+      # Phase 5: Web dashboard (localhost-only)
+      - "127.0.0.1:3333:3333"
+      # Phase 5: OAuth callback (temporary, for initial setup only)
+      - "127.0.0.1:9876:9876"
     restart: unless-stopped
 
   bridge-telegram:
@@ -61,6 +70,16 @@ services:
       context: .
       dockerfile: packages/executor-file/Dockerfile
     image: secureclaw-executor-file
+    profiles:
+      - build
+
+  # Phase 5: Web executor — headless Chromium with strict network controls.
+  # Built on demand by the dispatcher, not a running service.
+  executor-web:
+    build:
+      context: .
+      dockerfile: packages/executor-web/Dockerfile
+    image: secureclaw-executor-web
     profiles:
       - build
 

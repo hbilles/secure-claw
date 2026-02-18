@@ -24,7 +24,7 @@
 import Docker from 'dockerode';
 import { mintCapabilityToken } from '@secureclaw/shared';
 import type { Capability, Mount, ExecutorResult } from '@secureclaw/shared';
-import type { SecureClawConfig, MountConfig } from './config.js';
+import type { SecureClawConfig, MountConfig, WebExecutorConfig } from './config.js';
 
 export type { ExecutorResult };
 
@@ -55,26 +55,29 @@ export class Dispatcher {
    * Execute a task in a sandboxed Docker container.
    *
    * Security constraints applied to every container:
-   * - --cap-drop=ALL (no Linux capabilities)
+   * - --cap-drop=ALL (no Linux capabilities) — except web executor (needs NET_ADMIN temporarily)
    * - --security-opt=no-new-privileges
    * - Runs as non-root (UID 1000)
-   * - --network=none (no network access)
+   * - --network=none (no network access) — except web executor (HTTPS only)
    * - Memory and CPU limits from config
    * - Only declared mount volumes accessible
    */
   async execute(
-    executorType: 'shell' | 'file',
+    executorType: 'shell' | 'file' | 'web',
     task: TaskPayload,
     mounts?: MountConfig[],
   ): Promise<ExecutorResult> {
     const executorConfig = executorType === 'shell'
       ? this.config.executors.shell
-      : this.config.executors.file;
+      : executorType === 'file'
+        ? this.config.executors.file
+        : this.config.executors.web;
 
-    // Use provided mounts or all configured mounts
-    const mountConfigs = mounts ?? this.config.mounts;
+    // Web executor doesn't get filesystem mounts (no host filesystem access)
+    const mountConfigs = executorType === 'web' ? [] : (mounts ?? this.config.mounts);
 
     // Build capability object for the token
+    const isWeb = executorType === 'web';
     const capability: Capability = {
       executorType,
       mounts: mountConfigs.map((m): Mount => ({
@@ -82,7 +85,9 @@ export class Dispatcher {
         containerPath: m.containerPath,
         readOnly: m.readOnly,
       })),
-      network: 'none',
+      network: isWeb
+        ? { allowedDomains: (executorConfig as WebExecutorConfig).allowedDomains || [] }
+        : 'none',
       timeoutSeconds: executorConfig.defaultTimeout,
       maxOutputBytes: executorConfig.defaultMaxOutput,
     };
@@ -101,27 +106,38 @@ export class Dispatcher {
         `TASK=${taskBase64}`,
         `CAPABILITY_SECRET=${this.capabilitySecret}`,
       ],
-      // Security: run as non-root user (UID 1000)
-      User: '1000',
       WorkingDir: '/workspace',
-      // Disable network access
-      NetworkDisabled: true,
       HostConfig: {
-        // Security: drop ALL Linux capabilities
-        CapDrop: ['ALL'],
         // Security: prevent privilege escalation
         SecurityOpt: ['no-new-privileges'],
         // Resource limits
         Memory: parseMemoryLimit(executorConfig.memoryLimit),
         NanoCpus: Math.floor(executorConfig.cpuLimit * 1e9),
-        // Mount only the volumes specified in the capability token
-        Binds: mountConfigs.map(
-          (m) => `${m.hostPath}:${m.containerPath}:${m.readOnly ? 'ro' : 'rw'}`,
-        ),
-        // Explicit: no network
-        NetworkMode: 'none',
       },
     };
+
+    if (isWeb) {
+      // Web executor: needs network for HTTPS and NET_ADMIN for iptables setup
+      // The entrypoint script sets iptables rules and then drops to non-root
+      containerConfig.NetworkDisabled = false;
+      containerConfig.User = '0'; // Root for iptables setup; entrypoint drops to node
+      containerConfig.HostConfig!.CapAdd = ['NET_ADMIN', 'SETUID', 'SETGID'];
+      containerConfig.HostConfig!.CapDrop = ['ALL'];
+      // DNS: use Docker's default (mirrors host DNS).
+      // The entrypoint's iptables allow DNS (port 53) BEFORE blocking private
+      // IPs, so Docker's internal DNS DNAT (127.0.0.11 → 172.x.x.x) works.
+      // No filesystem mounts — web executor cannot access host filesystem
+      containerConfig.HostConfig!.Binds = [];
+    } else {
+      // Shell/file executors: strict sandboxing
+      containerConfig.User = '1000';
+      containerConfig.NetworkDisabled = true;
+      containerConfig.HostConfig!.CapDrop = ['ALL'];
+      containerConfig.HostConfig!.Binds = mountConfigs.map(
+        (m) => `${m.hostPath}:${m.containerPath}:${m.readOnly ? 'ro' : 'rw'}`,
+      );
+      containerConfig.HostConfig!.NetworkMode = 'none';
+    }
 
     const startTime = Date.now();
     let container: Docker.Container | null = null;
@@ -173,6 +189,16 @@ export class Dispatcher {
       console.log(
         `[dispatcher] Container ${shortId} exited with code ${exitResult.statusCode} in ${durationMs}ms`,
       );
+
+      // Log stderr for debugging (entrypoint messages and errors)
+      if (output.stderr.trim()) {
+        console.log(`[dispatcher] Container ${shortId} stderr: ${output.stderr.trim()}`);
+      }
+
+      // Log raw stdout for debugging
+      if (output.stdout.trim()) {
+        console.log(`[dispatcher] Container ${shortId} stdout: ${output.stdout.trim().slice(0, 500)}`);
+      }
 
       // Parse stdout as JSON result from the executor
       try {

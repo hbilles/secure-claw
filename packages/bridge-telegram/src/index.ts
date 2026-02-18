@@ -39,6 +39,12 @@ import type {
   SessionListResponse,
   TaskStopRequest,
   TaskStopResponse,
+  // Phase 5
+  HeartbeatListRequest,
+  HeartbeatListResponse,
+  HeartbeatToggleRequest,
+  HeartbeatToggleResponse,
+  HeartbeatTriggered,
 } from '@secureclaw/shared';
 
 // ---------------------------------------------------------------------------
@@ -135,7 +141,7 @@ bot.command('forget', async (ctx) => {
   if (!topic) {
     await ctx.reply(
       '⚠️ Usage: `/forget <topic>`\n\nExample: `/forget coding style`',
-      { parse_mode: 'Markdown' },
+      { parse_mode: 'MarkdownV2' },
     );
     return;
   }
@@ -196,6 +202,62 @@ bot.command('stop', async (ctx) => {
   if (socketClient.connected) {
     socketClient.send(request);
     console.log(`[bridge-telegram] Sent task-stop request for user ${userId}`);
+  } else {
+    await ctx.reply('Sorry, I\'m not connected to the gateway right now.');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5: Heartbeat Commands
+// ---------------------------------------------------------------------------
+
+/**
+ * /heartbeats — List all heartbeats and their status.
+ */
+bot.command('heartbeats', async (ctx) => {
+  const userId = ctx.from?.id.toString();
+  if (!userId || !ALLOWED_USER_IDS.has(userId)) return;
+
+  const chatId = ctx.chat.id.toString();
+
+  const request: HeartbeatListRequest = {
+    type: 'heartbeat-list',
+    userId,
+    chatId,
+  };
+
+  if (socketClient.connected) {
+    socketClient.send(request);
+    console.log(`[bridge-telegram] Sent heartbeat-list request for user ${userId}`);
+  } else {
+    await ctx.reply('Sorry, I\'m not connected to the gateway right now.');
+  }
+});
+
+/**
+ * Handle heartbeat enable/disable commands.
+ * Format: /heartbeat_enable <name> or /heartbeat_disable <name>
+ */
+bot.hears(/^\/(heartbeat_enable|heartbeat_disable)\s+(.+)$/i, async (ctx) => {
+  const userId = ctx.from?.id.toString();
+  if (!userId || !ALLOWED_USER_IDS.has(userId)) return;
+
+  const chatId = ctx.chat.id.toString();
+  const action = ctx.match[1]!;
+  const name = ctx.match[2]!.trim();
+  const enabled = action === 'heartbeat_enable';
+
+  const request: HeartbeatToggleRequest = {
+    type: 'heartbeat-toggle',
+    userId,
+    chatId,
+    name,
+    enabled,
+  };
+
+  if (socketClient.connected) {
+    socketClient.send(request);
+    console.log(`[bridge-telegram] Sent heartbeat-toggle request: ${name} → ${enabled}`);
   } else {
     await ctx.reply('Sorry, I\'m not connected to the gateway right now.');
   }
@@ -378,6 +440,19 @@ socketClient.on('message', async (data: unknown) => {
       await handleTaskStopResponse(data as TaskStopResponse);
       return;
 
+    // Phase 5: Heartbeat message types
+    case 'heartbeat-list-response':
+      await handleHeartbeatListResponse(data as HeartbeatListResponse);
+      return;
+
+    case 'heartbeat-toggle-response':
+      await handleHeartbeatToggleResponse(data as HeartbeatToggleResponse);
+      return;
+
+    case 'heartbeat-triggered':
+      await handleHeartbeatTriggered(data as HeartbeatTriggered);
+      return;
+
     default:
       // Standard socket response (no type field)
       await handleSocketResponse(data as SocketResponse);
@@ -415,7 +490,7 @@ async function handleApprovalRequest(request: ApprovalRequest): Promise<void> {
 
   try {
     const sent = await bot.api.sendMessage(chatId, messageText, {
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       reply_markup: keyboard,
     });
 
@@ -468,7 +543,7 @@ async function handleApprovalExpired(expired: ApprovalExpired): Promise<void> {
         ref.chatId,
         ref.messageId,
         '⏰ *Approval Expired*\n\nThis approval request timed out after 5 minutes. The action was not executed.',
-        { parse_mode: 'Markdown' },
+        { parse_mode: 'MarkdownV2' },
       );
       console.log(`[bridge-telegram] Marked approval ${approvalId} as expired`);
     } catch (err) {
@@ -496,7 +571,7 @@ async function handleTaskProgress(progress: TaskProgressUpdate): Promise<void> {
   const { chatId, text } = progress;
 
   try {
-    await bot.api.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    await bot.api.sendMessage(chatId, text, { parse_mode: 'MarkdownV2' });
     console.log(`[bridge-telegram] Sent task progress to chat ${chatId}`);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -558,7 +633,7 @@ async function handleMemoryListResponse(response: MemoryListResponse): Promise<v
   }
 
   try {
-    await bot.api.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    await bot.api.sendMessage(chatId, text, { parse_mode: 'MarkdownV2' });
     console.log(`[bridge-telegram] Sent memory list (${memories.length} items) to chat ${chatId}`);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -632,7 +707,7 @@ async function handleSessionListResponse(response: SessionListResponse): Promise
   }
 
   try {
-    await bot.api.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    await bot.api.sendMessage(chatId, text, { parse_mode: 'MarkdownV2' });
     console.log(`[bridge-telegram] Sent session list (${sessions.length} items) to chat ${chatId}`);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -689,6 +764,84 @@ async function handleSocketResponse(response: SocketResponse): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5: Heartbeat Handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle heartbeat list response.
+ */
+async function handleHeartbeatListResponse(response: HeartbeatListResponse): Promise<void> {
+  const { chatId, heartbeats } = response;
+
+  if (heartbeats.length === 0) {
+    try {
+      await bot.api.sendMessage(chatId, '⏰ No heartbeats configured.');
+    } catch {
+      // Best-effort
+    }
+    return;
+  }
+
+  let text = '⏰ *Heartbeats*\n\n';
+
+  for (const hb of heartbeats) {
+    const status = hb.enabled ? '🟢 Enabled' : '🔴 Disabled';
+    const prompt = hb.prompt.length > 100 ? hb.prompt.slice(0, 100) + '…' : hb.prompt;
+    text += `**${escapeMarkdown(hb.name)}** — ${status}\n`;
+    text += `  Schedule: \`${escapeMarkdown(hb.schedule)}\`\n`;
+    text += `  Prompt: _${escapeMarkdown(prompt)}_\n\n`;
+  }
+
+  text += '_Commands:_\n';
+  text += '`/heartbeat_enable <name>` — Enable a heartbeat\n';
+  text += '`/heartbeat_disable <name>` — Disable a heartbeat';
+
+  try {
+    await bot.api.sendMessage(chatId, text, { parse_mode: 'MarkdownV2' });
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('[bridge-telegram] Failed to send heartbeat list:', error.message);
+    try {
+      await bot.api.sendMessage(chatId, `⏰ ${heartbeats.length} heartbeat(s) configured.`);
+    } catch {
+      // Best-effort
+    }
+  }
+}
+
+/**
+ * Handle heartbeat toggle response.
+ */
+async function handleHeartbeatToggleResponse(response: HeartbeatToggleResponse): Promise<void> {
+  const { chatId, name, enabled, success } = response;
+
+  const text = success
+    ? `⏰ Heartbeat "${name}" ${enabled ? 'enabled ✅' : 'disabled 🔴'}`
+    : `⚠️ Heartbeat "${name}" not found.`;
+
+  try {
+    await bot.api.sendMessage(chatId, text);
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('[bridge-telegram] Failed to send heartbeat toggle response:', error.message);
+  }
+}
+
+/**
+ * Handle heartbeat triggered notification.
+ */
+async function handleHeartbeatTriggered(triggered: HeartbeatTriggered): Promise<void> {
+  const { chatId, name } = triggered;
+
+  try {
+    await bot.api.sendMessage(chatId, `⏰ Heartbeat "${name}" triggered...`, { parse_mode: 'MarkdownV2' });
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('[bridge-telegram] Failed to send heartbeat triggered notification:', error.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
@@ -707,6 +860,11 @@ function formatToolSummary(toolName: string, toolInput: Record<string, unknown>)
       const cmd = String(toolInput['command'] ?? '');
       const display = cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd;
       return `run\\_shell\\_command → \`${escapeMarkdown(display)}\``;
+    }
+    case 'browse_web': {
+      const url = String(toolInput['url'] ?? 'unknown URL');
+      const action = String(toolInput['action'] ?? 'navigate');
+      return `browse\\_web → ${escapeMarkdown(url)} \\(${escapeMarkdown(action)}\\)`;
     }
     default:
       return `${escapeMarkdown(toolName)}`;

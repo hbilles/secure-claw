@@ -87,7 +87,16 @@ export class HITLGate {
     const { sessionId, toolName, toolInput, chatId, reason, planContext } = params;
 
     // 1. Classify the action
-    const tier = classifyAction(toolName, toolInput, this.config);
+    let tier = classifyAction(toolName, toolInput, this.config);
+
+    // Phase 5: Override for trusted web domains
+    // browse_web calls to trusted domains use "notify" tier instead of "require-approval"
+    if (toolName === 'browse_web' && tier === 'require-approval') {
+      const url = toolInput['url'] as string | undefined;
+      if (url && this.isURLTrusted(url)) {
+        tier = 'notify';
+      }
+    }
 
     // 2. Audit the classification decision
     this.auditLogger.logActionClassified(sessionId, {
@@ -193,6 +202,28 @@ export class HITLGate {
   }
 
   /**
+   * Check if a URL is on the trusted domains list.
+   * Trusted domains use "notify" tier instead of "require-approval" for browse_web.
+   */
+  private isURLTrusted(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase();
+      const trustedDomains = this.config.trustedDomains || [];
+
+      for (const domain of trustedDomains) {
+        const lowerDomain = domain.toLowerCase();
+        if (hostname === lowerDomain || hostname.endsWith(`.${lowerDomain}`)) {
+          return true;
+        }
+      }
+    } catch {
+      // Invalid URL — not trusted
+    }
+    return false;
+  }
+
+  /**
    * Create a Promise that resolves when the user makes a decision
    * or rejects when the timeout fires.
    */
@@ -244,6 +275,36 @@ function summarizeAction(toolName: string, toolInput: Record<string, unknown>): 
       const cmd = String(toolInput['command'] ?? '');
       return `Running: ${cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd}`;
     }
+    // Phase 5: Web browsing
+    case 'browse_web':
+      return `Browsing: ${toolInput['url'] ?? 'unknown URL'} (${toolInput['action'] ?? 'navigate'})`;
+    // Phase 5: Gmail
+    case 'search_email':
+      return `Searching email: "${toolInput['query'] ?? ''}"`;
+    case 'read_email':
+      return `Reading email: ${toolInput['id'] ?? 'unknown'}`;
+    case 'send_email':
+      return `Sending email to ${toolInput['to'] ?? 'unknown'}: "${toolInput['subject'] ?? ''}"`;
+    case 'reply_email':
+      return `Replying to email ${toolInput['id'] ?? 'unknown'}`;
+    // Phase 5: Calendar
+    case 'list_events':
+      return `Listing calendar events`;
+    case 'create_event':
+      return `Creating event: "${toolInput['summary'] ?? ''}"`;
+    case 'update_event':
+      return `Updating event ${toolInput['id'] ?? 'unknown'}`;
+    // Phase 5: GitHub
+    case 'search_repos':
+      return `Searching GitHub repos: "${toolInput['query'] ?? ''}"`;
+    case 'list_issues':
+      return `Listing issues for ${toolInput['repo'] ?? 'unknown'}`;
+    case 'create_issue':
+      return `Creating issue in ${toolInput['repo'] ?? 'unknown'}: "${toolInput['title'] ?? ''}"`;
+    case 'create_pr':
+      return `Creating PR in ${toolInput['repo'] ?? 'unknown'}: "${toolInput['title'] ?? ''}"`;
+    case 'read_file_github':
+      return `Reading file from ${toolInput['repo'] ?? 'unknown'}: ${toolInput['path'] ?? 'unknown'}`;
     default:
       return JSON.stringify(toolInput).slice(0, 100);
   }

@@ -493,6 +493,25 @@ export class MemoryStore {
     }));
   }
 
+  /** Get all recent sessions regardless of user (for the dashboard). */
+  getAllRecentSessions(limit: number = 50): TaskSession[] {
+    const rows = this.db.prepare(`
+      SELECT id, user_id AS userId, status, original_request AS originalRequest,
+             plan, iteration, max_iterations AS maxIterations,
+             created_at AS createdAt, updated_at AS updatedAt
+      FROM task_sessions
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit) as Array<
+      Omit<TaskSession, 'plan'> & { plan: string | null }
+    >;
+
+    return rows.map((row) => ({
+      ...row,
+      plan: row.plan ? (JSON.parse(row.plan) as SessionPlan) : null,
+    }));
+  }
+
   /** Cancel any active session for a user. Returns the cancelled session ID or null. */
   cancelActiveSession(userId: string): string | null {
     const active = this.getActiveSession(userId);

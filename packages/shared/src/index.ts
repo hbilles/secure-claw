@@ -23,6 +23,12 @@ export type {
   SessionListResponse,
   TaskStopRequest,
   TaskStopResponse,
+  // Phase 5
+  HeartbeatListRequest,
+  HeartbeatListResponse,
+  HeartbeatToggleRequest,
+  HeartbeatToggleResponse,
+  HeartbeatTriggered,
 } from './types.js';
 
 export type {

@@ -13,6 +13,7 @@ COPY packages/gateway/package.json packages/gateway/
 COPY packages/bridge-telegram/package.json packages/bridge-telegram/
 COPY packages/executor-shell/package.json packages/executor-shell/
 COPY packages/executor-file/package.json packages/executor-file/
+COPY packages/executor-web/package.json packages/executor-web/
 
 # Install build tools for native modules (better-sqlite3)
 RUN apk add --no-cache python3 make g++
@@ -45,6 +46,7 @@ COPY packages/gateway/package.json packages/gateway/
 COPY packages/bridge-telegram/package.json packages/bridge-telegram/
 COPY packages/executor-shell/package.json packages/executor-shell/
 COPY packages/executor-file/package.json packages/executor-file/
+COPY packages/executor-web/package.json packages/executor-web/
 
 # Copy built output
 COPY --from=builder /app/packages/shared/dist/ packages/shared/dist/

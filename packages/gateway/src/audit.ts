@@ -19,9 +19,15 @@ export class AuditLogger {
   private auditDir: string;
   private currentDate: string = '';
   private stream: fs.WriteStream | null = null;
+  private onLog: ((entry: Record<string, unknown>) => void) | null = null;
 
   constructor(auditDir?: string) {
     this.auditDir = auditDir ?? process.env['AUDIT_DIR'] ?? DEFAULT_AUDIT_DIR;
+  }
+
+  /** Register a callback for new log entries (used by dashboard SSE). */
+  setOnLog(callback: (entry: Record<string, unknown>) => void): void {
+    this.onLog = callback;
   }
 
   /** Ensure the audit directory exists and open the initial stream. */
@@ -34,11 +40,21 @@ export class AuditLogger {
   /** Log an audit entry. */
   log(entry: AuditEntry): void {
     this.ensureStream();
-    const line = JSON.stringify({
+    const serialized = {
       ...entry,
       timestamp: entry.timestamp.toISOString(),
-    });
+    };
+    const line = JSON.stringify(serialized);
     this.stream!.write(line + '\n');
+
+    // Phase 5: Push to dashboard SSE clients
+    if (this.onLog) {
+      try {
+        this.onLog(serialized);
+      } catch {
+        // Dashboard error — ignore
+      }
+    }
   }
 
   /** Convenience: log a message_received event. */

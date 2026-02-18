@@ -1,5 +1,5 @@
 # SecureClaw Configuration
-# Phase 2: Sandboxed tool execution via Docker containers
+# Phase 5: Web browsing, external services, heartbeats, dashboard
 
 llm:
   provider: anthropic
@@ -21,6 +21,25 @@ executors:
     defaultTimeout: 30
     defaultMaxOutput: 5242880  # 5MB
 
+  web:
+    image: secureclaw-executor-web
+    memoryLimit: 1g
+    cpuLimit: 2
+    defaultTimeout: 120
+    defaultMaxOutput: 2097152  # 2MB
+    # Domains the web executor is allowed to access (HTTPS only).
+    # All other domains are blocked at the DNS level.
+    allowedDomains:
+      - news.ycombinator.com
+      - github.com
+      - docs.anthropic.com
+      - docs.google.com
+      - stackoverflow.com
+      - en.wikipedia.org
+      - developer.mozilla.org
+      - npmjs.com
+      - pypi.org
+
 # Mount policies: what host directories are accessible, and how.
 # hostPath uses the Docker host's filesystem (~ is resolved at runtime).
 # containerPath is the path inside executor containers.
@@ -40,7 +59,7 @@ mounts:
     containerPath: /sandbox
     readOnly: false
 
-# Action tiers — Phase 3 HITL approval gates.
+# Action tiers — HITL approval gates.
 # Classification is code-only; the LLM never sees these tiers.
 # Rules are checked in order: autoApprove → notify → requireApproval.
 # If no rule matches, the default is requireApproval (fail-safe).
@@ -55,11 +74,20 @@ actionTiers:
     - tool: run_shell_command
       conditions:
         working_directory: /sandbox/**
+    # Phase 5: Read-only service tools
+    - tool: search_email
+    - tool: read_email
+    - tool: list_events
+    - tool: search_repos
+    - tool: list_issues
+    - tool: read_file_github
 
   notify:
     - tool: write_file
       conditions:
         path: /sandbox/**
+    # Phase 5: Browse trusted domains (notify instead of require-approval)
+    # browse_web on untrusted domains falls through to require-approval
 
   requireApproval:
     - tool: write_file
@@ -68,3 +96,51 @@ actionTiers:
     - tool: run_shell_command
       conditions:
         working_directory: "!(/sandbox/**)"
+    # Phase 5: All outgoing actions always require approval
+    - tool: send_email
+    - tool: reply_email
+    - tool: create_event
+    - tool: update_event
+    - tool: create_issue
+    - tool: create_pr
+    # Phase 5: Web browsing (default tier — all browse_web calls)
+    - tool: browse_web
+
+# Domains trusted for web browsing.
+# browse_web calls to these domains use the "notify" tier instead of "require-approval".
+trustedDomains:
+  - github.com
+  - docs.anthropic.com
+  - stackoverflow.com
+  - en.wikipedia.org
+  - developer.mozilla.org
+
+# Heartbeat schedules — proactive agent triggers.
+# Each heartbeat creates a new session with the specified prompt.
+# HITL approval still applies for any dangerous actions.
+heartbeats:
+  - name: morning-briefing
+    schedule: "0 8 * * 1-5"        # 8am weekdays
+    prompt: "Give me a brief morning summary: any important emails from overnight, calendar events for today, and any ongoing task updates."
+    enabled: true
+
+  - name: email-check
+    schedule: "*/30 * * * *"        # Every 30 minutes
+    prompt: "Check my email for anything urgent or time-sensitive. Only message me if there's something that needs attention."
+    enabled: false                   # Disabled by default
+
+# GitHub repos owned by the user (read_file_github auto-approves for these).
+ownGitHubRepos: []
+  # - yourusername/yourrepo
+
+# OAuth service configurations (optional).
+# Set client ID and secret for each service you want to connect.
+# oauth:
+#   google:
+#     clientId: your-google-client-id
+#     clientSecret: your-google-client-secret
+#     callbackPort: 9876
+#   github:
+#     clientId: your-github-client-id
+#     clientSecret: your-github-client-secret
+#     callbackPort: 9876

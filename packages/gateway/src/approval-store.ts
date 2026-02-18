@@ -183,6 +183,28 @@ export class ApprovalStore {
     }
   }
 
+  /** Get recent approvals (for the dashboard). */
+  getRecent(limit: number = 50): PendingApproval[] {
+    return this.db.prepare(`
+      SELECT
+        id,
+        session_id       AS sessionId,
+        tool_name        AS toolName,
+        tool_input       AS toolInput,
+        capability,
+        reason,
+        plan_context     AS planContext,
+        status,
+        created_at       AS createdAt,
+        resolved_at      AS resolvedAt,
+        telegram_message_id AS telegramMessageId,
+        telegram_chat_id    AS telegramChatId
+      FROM pending_approvals
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit) as PendingApproval[];
+  }
+
   /** Close the database and stop the expiry timer. */
   close(): void {
     if (this.expiryTimer) {

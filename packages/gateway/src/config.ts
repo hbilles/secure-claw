@@ -6,6 +6,8 @@
  * - ~ → home directory resolution for mount paths
  * - Validation of required fields
  * - Warnings for missing host paths (expected in Docker)
+ *
+ * Phase 5: Added web executor config, heartbeats, trustedDomains, service config.
  */
 
 import * as fs from 'node:fs';
@@ -32,9 +34,26 @@ export interface ExecutorConfig {
   defaultMaxOutput: number;
 }
 
+export interface WebExecutorConfig extends ExecutorConfig {
+  allowedDomains: string[];
+}
+
 export interface ActionCondition {
   tool: string;
   conditions?: Record<string, string>;
+}
+
+export interface HeartbeatConfig {
+  name: string;
+  schedule: string;
+  prompt: string;
+  enabled: boolean;
+}
+
+export interface OAuthServiceConfig {
+  clientId: string;
+  clientSecret: string;
+  callbackPort: number;
 }
 
 export interface SecureClawConfig {
@@ -46,12 +65,24 @@ export interface SecureClawConfig {
   executors: {
     shell: ExecutorConfig;
     file: ExecutorConfig;
+    web: WebExecutorConfig;
   };
   mounts: MountConfig[];
   actionTiers: {
     autoApprove: ActionCondition[];
     notify: ActionCondition[];
     requireApproval: ActionCondition[];
+  };
+  /** Domains trusted for web browsing (notify tier instead of require-approval). */
+  trustedDomains: string[];
+  /** Heartbeat schedules. */
+  heartbeats: HeartbeatConfig[];
+  /** GitHub repos owned by the user (for auto-approve tier). */
+  ownGitHubRepos: string[];
+  /** OAuth service configurations. */
+  oauth?: {
+    google?: OAuthServiceConfig;
+    github?: OAuthServiceConfig;
   };
 }
 
@@ -111,11 +142,35 @@ export function loadConfig(configPath?: string): SecureClawConfig {
     throw new Error('Configuration missing: at least one mount must be defined');
   }
 
+  // Defaults for Phase 5 fields
+  if (!config.executors.web) {
+    config.executors.web = {
+      image: 'secureclaw-executor-web',
+      memoryLimit: '1g',
+      cpuLimit: 2,
+      defaultTimeout: 120,
+      defaultMaxOutput: 2097152, // 2MB
+      allowedDomains: [],
+    };
+  }
+  if (!config.trustedDomains) {
+    config.trustedDomains = [];
+  }
+  if (!config.heartbeats) {
+    config.heartbeats = [];
+  }
+  if (!config.ownGitHubRepos) {
+    config.ownGitHubRepos = [];
+  }
+
   console.log(`[config] Configuration loaded:`);
   console.log(`[config]   LLM model: ${config.llm.model}`);
   console.log(`[config]   Mounts: ${config.mounts.map((m) => `${m.name} (${m.hostPath} → ${m.containerPath}${m.readOnly ? ', ro' : ''})`).join(', ')}`);
   console.log(`[config]   Shell executor: ${config.executors.shell.image} (timeout=${config.executors.shell.defaultTimeout}s, mem=${config.executors.shell.memoryLimit})`);
   console.log(`[config]   File executor: ${config.executors.file.image} (timeout=${config.executors.file.defaultTimeout}s, mem=${config.executors.file.memoryLimit})`);
+  console.log(`[config]   Web executor: ${config.executors.web.image} (timeout=${config.executors.web.defaultTimeout}s, domains=${config.executors.web.allowedDomains.length})`);
+  console.log(`[config]   Trusted domains: ${config.trustedDomains.length > 0 ? config.trustedDomains.join(', ') : '(none)'}`);
+  console.log(`[config]   Heartbeats: ${config.heartbeats.length} (${config.heartbeats.filter((h) => h.enabled).length} enabled)`);
 
   return config;
 }
