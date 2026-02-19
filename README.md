@@ -53,6 +53,7 @@ secure-claw/
 │   │       ├── orchestrator.ts      # Agentic tool-use loop with Claude
 │   │       ├── dispatcher.ts        # Docker container lifecycle + capability minting
 │   │       ├── hitl-gate.ts         # Action classification + approval queue
+│   │       ├── domain-manager.ts    # Runtime domain allowlist (base config + session grants)
 │   │       ├── classifier.ts        # Rule engine for action tier matching
 │   │       ├── loop.ts              # Ralph Wiggum loop (multi-step tasks)
 │   │       ├── memory.ts            # SQLite-backed persistent memory (FTS5)
@@ -116,6 +117,8 @@ User (Telegram) → Bridge → Gateway → LLM → [tool calls] → Executors �
    - **auto-approve**: Safe read operations (read file, search, list directory, search email)
    - **notify**: Moderate-risk operations (write to sandbox, browse trusted domains) — executes and notifies the user
    - **require-approval**: Irreversible actions (send email, write outside sandbox, create GitHub issue) — pauses execution and sends an inline-keyboard approval request to Telegram
+
+   If the user selects **Allow for Session** on an approval request, future matching actions in the same session are automatically downgraded to `notify` tier.
 
 4. **Execute** — The Gateway's Dispatcher creates an ephemeral Docker container for the appropriate executor, passing a JWT capability token and the task payload. The container starts, validates the token, executes the operation, writes a JSON result to stdout, and exits. The Dispatcher reads the result and removes the container. Service tools (Gmail, Calendar, GitHub) execute in-process within the Gateway using OAuth tokens.
 
@@ -195,7 +198,7 @@ The executor runtime validates the token before executing anything.
 
 ### L4 — Human-in-the-Loop Gate
 
-Actions are classified by the Gateway in code, not by the LLM. The classification rules in `secureclaw.yaml` match on tool name and input field patterns (e.g., path glob, working directory). If no rule matches, the default is **require-approval** (fail-safe). Approval requests are sent to Telegram as inline keyboard buttons.
+Actions are classified by the Gateway in code, not by the LLM. The classification rules in `secureclaw.yaml` match on tool name and input field patterns (e.g., path glob, working directory). If no rule matches, the default is **require-approval** (fail-safe). Approval requests are sent to Telegram with three options: **Approve** (one-time), **Allow for Session** (auto-approve matching actions for the remainder of the session), or **Reject**. Session grants expire when the user's session ends.
 
 ### L5 — Audit Trail
 
@@ -221,7 +224,7 @@ Controls the entire system:
 - **`executors`** — Per-executor image, memory/CPU limits, timeouts, output caps. The web executor also specifies its domain allowlist here.
 - **`mounts`** — Host directory → container path mappings with read/write permissions. These define what the file and shell executors can see.
 - **`actionTiers`** — HITL classification rules. Ordered lists of tool + condition patterns for `autoApprove`, `notify`, and `requireApproval`.
-- **`trustedDomains`** — Domains that downgrade `browse_web` from require-approval to notify tier.
+- **`trustedDomains`** — Base domains that downgrade `browse_web` from require-approval to notify tier. Additional domains can be approved dynamically at runtime — when the agent visits an unlisted domain, the user is prompted to allow it for the session.
 - **`heartbeats`** — Cron schedules for proactive agent triggers with prompt templates.
 - **`oauth`** — Google and GitHub OAuth client credentials for service integrations.
 

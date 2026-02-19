@@ -349,7 +349,7 @@ bot.on('callback_query:data', async (ctx) => {
   const action = data.slice(0, colonIndex);
   const approvalId = data.slice(colonIndex + 1);
 
-  if (action !== 'approve' && action !== 'reject') {
+  if (action !== 'approve' && action !== 'reject' && action !== 'session') {
     await ctx.answerCallbackQuery({ text: 'Invalid action' });
     return;
   }
@@ -360,7 +360,10 @@ bot.on('callback_query:data', async (ctx) => {
     return;
   }
 
-  const decision: 'approved' | 'rejected' = action === 'approve' ? 'approved' : 'rejected';
+  const decision: 'approved' | 'rejected' | 'session-approved' =
+    action === 'approve' ? 'approved' :
+    action === 'session' ? 'session-approved' :
+    'rejected';
 
   // Send the decision to the gateway
   const approvalDecision: ApprovalDecision = {
@@ -382,8 +385,8 @@ bot.on('callback_query:data', async (ctx) => {
   approvalMessages.delete(approvalId);
 
   // Edit the original message to show the decision (remove buttons)
-  const statusEmoji = decision === 'approved' ? '✅' : '❌';
-  const statusText = decision === 'approved' ? 'Approved' : 'Rejected';
+  const statusEmoji = decision === 'approved' ? '✅' : decision === 'session-approved' ? '🔄' : '❌';
+  const statusText = decision === 'approved' ? 'Approved' : decision === 'session-approved' ? 'Allowed for Session' : 'Rejected';
 
   try {
     const originalText = ctx.callbackQuery.message?.text ?? '';
@@ -469,14 +472,22 @@ socketClient.on('message', async (data: unknown) => {
  * Sends a Telegram message with inline Approve/Reject buttons.
  */
 async function handleApprovalRequest(request: ApprovalRequest): Promise<void> {
-  const { approvalId, toolName, toolInput, reason, planContext, chatId } = request;
+  const { approvalId, toolName, toolInput, reason, planContext, chatId, metadata } = request;
 
   // Strip <think> tags from the reason (thinking models include chain-of-thought)
   const cleanReason = reason ? cleanLLMResponse(reason) : '';
 
+  // Check if this is a domain request (Phase 7)
+  const isDomainRequest = metadata?.type === 'domain-request' && metadata.domain;
+
   // Format the approval message
-  const toolSummary = formatToolSummary(toolName, toolInput);
-  let messageText = `🔒 *Approval Required*\n\nThe agent wants to:\n  📝 ${toolSummary}`;
+  let messageText: string;
+  if (isDomainRequest) {
+    messageText = `🌐 *New Domain Request*\n\nThe agent wants to visit: \`${escapeMarkdown(metadata.domain!)}\`\nThis domain is not on the allowed list\\.`;
+  } else {
+    const toolSummary = formatToolSummary(toolName, toolInput);
+    messageText = `🔒 *Approval Required*\n\nThe agent wants to:\n  📝 ${toolSummary}`;
+  }
 
   if (cleanReason) {
     messageText += `\n\nReason: _"${escapeMarkdown(cleanReason)}"_`;
@@ -496,16 +507,24 @@ async function handleApprovalRequest(request: ApprovalRequest): Promise<void> {
     const truncatedReason = cleanReason.slice(0, maxReasonLen) + '… (truncated)';
 
     // Rebuild the message with the truncated reason
-    messageText = `🔒 *Approval Required*\n\nThe agent wants to:\n  📝 ${toolSummary}`;
+    if (isDomainRequest) {
+      messageText = `🌐 *New Domain Request*\n\nThe agent wants to visit: \`${escapeMarkdown(metadata!.domain!)}\`\nThis domain is not on the allowed list\\.`;
+    } else {
+      const toolSummary = formatToolSummary(toolName, toolInput);
+      messageText = `🔒 *Approval Required*\n\nThe agent wants to:\n  📝 ${toolSummary}`;
+    }
     messageText += `\n\nReason: _"${escapeMarkdown(truncatedReason)}"_`;
     if (planContext) {
       messageText += `\n\nContext: ${escapeMarkdown(planContext)}`;
     }
   }
 
-  // Build inline keyboard with Approve/Reject buttons
+  // Build inline keyboard with Approve / Allow for Session / Reject buttons
+  const approveLabel = isDomainRequest ? '✅ Allow Once' : '✅ Approve';
   const keyboard = new InlineKeyboard()
-    .text('✅ Approve', `approve:${approvalId}`)
+    .text(approveLabel, `approve:${approvalId}`)
+    .text('🔄 Allow for Session', `session:${approvalId}`)
+    .row()
     .text('❌ Reject', `reject:${approvalId}`);
 
   try {

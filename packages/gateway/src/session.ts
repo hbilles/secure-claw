@@ -23,6 +23,9 @@ export class SessionManager {
   private sessions: Map<string, Session> = new Map();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** Optional callback invoked when a session expires, for cleaning up session-scoped state. */
+  onSessionExpired?: (userId: string) => void;
+
   constructor() {
     this.cleanupTimer = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
     // Allow the process to exit even if the timer is still running
@@ -83,7 +86,7 @@ export class SessionManager {
     return this.sessions.get(userId);
   }
 
-  /** Remove expired sessions. */
+  /** Remove expired sessions and notify listeners. */
   private cleanup(): void {
     const now = Date.now();
     let removed = 0;
@@ -91,6 +94,14 @@ export class SessionManager {
       if (now - session.updatedAt.getTime() > SESSION_TTL_MS) {
         this.sessions.delete(userId);
         removed++;
+        // Notify listeners so session-scoped state (grants, domains) can be cleaned up
+        if (this.onSessionExpired) {
+          try {
+            this.onSessionExpired(userId);
+          } catch (err) {
+            console.error(`[session] onSessionExpired callback error for user ${userId}:`, err);
+          }
+        }
       }
     }
     if (removed > 0) {

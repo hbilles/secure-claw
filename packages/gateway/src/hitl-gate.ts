@@ -17,6 +17,7 @@ import { classifyAction } from './classifier.js';
 import type { ApprovalStore } from './approval-store.js';
 import type { AuditLogger } from './audit.js';
 import type { SecureClawConfig } from './config.js';
+import type { DomainManager } from './domain-manager.js';
 import type { ActionTier, ApprovalRequest, BridgeNotification, ApprovalExpired } from '@secureclaw/shared';
 
 // ---------------------------------------------------------------------------
@@ -31,11 +32,17 @@ export interface GateResult {
 
 export interface GateParams {
   sessionId: string;
+  userId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
   chatId: string;
   reason: string;
   planContext?: string;
+  /** Optional metadata passed through to the approval request (e.g., domain-request info). */
+  metadata?: {
+    type?: 'domain-request';
+    domain?: string;
+  };
 }
 
 type SendToBridgeFn = (message: ApprovalRequest | BridgeNotification | ApprovalExpired) => void;
@@ -44,6 +51,18 @@ interface PendingDecision {
   resolve: (decision: 'approved' | 'rejected') => void;
   timer: ReturnType<typeof setTimeout>;
   chatId: string;
+  userId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+}
+
+/** A session-scoped permission grant that auto-approves matching future actions. */
+interface SessionGrant {
+  toolName: string;
+  /** Normalized key: domain for browse_web, dir prefix for write_file, '*' for generic */
+  patternKey: string;
+  grantedAt: Date;
+  approvalId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +84,12 @@ export class HITLGate {
   /** Map of approval ID → pending promise resolver + timeout */
   private pendingDecisions: Map<string, PendingDecision> = new Map();
 
+  /** Session-scoped permission grants: Map<userId, SessionGrant[]> */
+  private sessionGrants: Map<string, SessionGrant[]> = new Map();
+
+  /** Optional DomainManager for dynamic trusted domain checks. */
+  private domainManager: DomainManager | null = null;
+
   constructor(
     approvalStore: ApprovalStore,
     auditLogger: AuditLogger,
@@ -77,6 +102,11 @@ export class HITLGate {
     this.sendToBridge = sendToBridge;
   }
 
+  /** Attach domain manager for dynamic trusted domain resolution. */
+  setDomainManager(domainManager: DomainManager): void {
+    this.domainManager = domainManager;
+  }
+
   /**
    * Gate a tool call through the HITL approval system.
    *
@@ -84,7 +114,7 @@ export class HITLGate {
    * or { proceed: false } if the user rejected or the approval expired.
    */
   async gate(params: GateParams): Promise<GateResult> {
-    const { sessionId, toolName, toolInput, chatId, reason, planContext } = params;
+    const { sessionId, userId, toolName, toolInput, chatId, reason, planContext, metadata } = params;
 
     // 1. Classify the action
     let tier = classifyAction(toolName, toolInput, this.config);
@@ -93,9 +123,15 @@ export class HITLGate {
     // browse_web calls to trusted domains use "notify" tier instead of "require-approval"
     if (toolName === 'browse_web' && tier === 'require-approval') {
       const url = toolInput['url'] as string | undefined;
-      if (url && this.isURLTrusted(url)) {
+      if (url && this.isURLTrusted(url, userId)) {
         tier = 'notify';
       }
+    }
+
+    // Session grant override: if a matching session grant exists, downgrade to notify
+    if (tier === 'require-approval' && this.checkSessionGrant(userId, toolName, toolInput)) {
+      tier = 'notify';
+      console.log(`[hitl-gate] Session grant matched for ${toolName}, downgrading to notify`);
     }
 
     // 2. Audit the classification decision
@@ -157,13 +193,14 @@ export class HITLGate {
           reason,
           planContext,
           chatId,
+          metadata,
         };
         this.sendToBridge(approvalRequest);
 
         console.log(`[hitl-gate] Awaiting approval ${approvalId} for ${toolName}`);
 
         // Await user decision (with timeout)
-        const decision = await this.awaitDecision(approvalId, chatId);
+        const decision = await this.awaitDecision(approvalId, chatId, userId, toolName, toolInput);
 
         // Update store and audit
         this.approvalStore.resolve(approvalId, decision === 'approved' ? 'approved' : 'rejected');
@@ -189,12 +226,31 @@ export class HITLGate {
    * Called when an approval decision arrives from the bridge.
    * Resolves the pending promise so the orchestrator can resume.
    */
-  resolveApproval(approvalId: string, decision: 'approved' | 'rejected'): void {
+  resolveApproval(approvalId: string, decision: 'approved' | 'rejected' | 'session-approved'): void {
     const pending = this.pendingDecisions.get(approvalId);
     if (pending) {
       clearTimeout(pending.timer);
       this.pendingDecisions.delete(approvalId);
-      pending.resolve(decision);
+
+      if (decision === 'session-approved') {
+        // Store a session grant so future matching actions auto-proceed
+        const patternKey = this.extractPatternKey(pending.toolName, pending.toolInput);
+        const grants = this.sessionGrants.get(pending.userId) ?? [];
+        grants.push({
+          toolName: pending.toolName,
+          patternKey,
+          grantedAt: new Date(),
+          approvalId,
+        });
+        this.sessionGrants.set(pending.userId, grants);
+        console.log(
+          `[hitl-gate] Session grant stored: user=${pending.userId} tool=${pending.toolName} key=${patternKey}`,
+        );
+        // Resolve as approved so the current action proceeds
+        pending.resolve('approved');
+      } else {
+        pending.resolve(decision);
+      }
     } else {
       // Decision arrived for a non-pending approval (already expired or resolved)
       console.warn(`[hitl-gate] No pending decision for approval ${approvalId}`);
@@ -204,13 +260,22 @@ export class HITLGate {
   /**
    * Check if a URL is on the trusted domains list.
    * Trusted domains use "notify" tier instead of "require-approval" for browse_web.
+   *
+   * Delegates to DomainManager if available (includes session-approved domains),
+   * otherwise falls back to static config check.
    */
-  private isURLTrusted(url: string): boolean {
+  private isURLTrusted(url: string, userId?: string): boolean {
     try {
       const parsed = new URL(url);
       const hostname = parsed.hostname.toLowerCase();
-      const trustedDomains = this.config.trustedDomains || [];
 
+      // Prefer DomainManager — includes base config + session-approved domains
+      if (this.domainManager && userId) {
+        return this.domainManager.isDomainTrusted(hostname, userId);
+      }
+
+      // Fallback: static config check
+      const trustedDomains = this.config.trustedDomains || [];
       for (const domain of trustedDomains) {
         const lowerDomain = domain.toLowerCase();
         if (hostname === lowerDomain || hostname.endsWith(`.${lowerDomain}`)) {
@@ -223,11 +288,98 @@ export class HITLGate {
     return false;
   }
 
+  // -------------------------------------------------------------------------
+  // Session Grant Management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Extract a normalized pattern key for session grant matching.
+   *
+   * - browse_web: hostname from URL (e.g., "github.com")
+   * - write_file: directory prefix from path (e.g., "/sandbox")
+   * - run_shell_command: working_directory prefix
+   * - Default: '*' (matches all uses of the tool)
+   */
+  private extractPatternKey(toolName: string, toolInput: Record<string, unknown>): string {
+    switch (toolName) {
+      case 'browse_web': {
+        const url = toolInput['url'] as string | undefined;
+        if (url) {
+          try {
+            return new URL(url).hostname.toLowerCase();
+          } catch {
+            return '*';
+          }
+        }
+        return '*';
+      }
+      case 'write_file': {
+        const path = toolInput['path'] as string | undefined;
+        if (path) {
+          // Extract the first two path segments as the directory prefix
+          const parts = path.split('/');
+          return parts.length >= 2 ? `/${parts[1]}` : '*';
+        }
+        return '*';
+      }
+      case 'run_shell_command': {
+        const wd = toolInput['working_directory'] as string | undefined;
+        if (wd) {
+          const parts = wd.split('/');
+          return parts.length >= 2 ? `/${parts[1]}` : '*';
+        }
+        return '*';
+      }
+      default:
+        return '*';
+    }
+  }
+
+  /**
+   * Check if a matching session grant exists for this action.
+   */
+  private checkSessionGrant(
+    userId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+  ): boolean {
+    const grants = this.sessionGrants.get(userId);
+    if (!grants || grants.length === 0) return false;
+
+    const patternKey = this.extractPatternKey(toolName, toolInput);
+
+    return grants.some(
+      (g) =>
+        g.toolName === toolName &&
+        (g.patternKey === '*' || g.patternKey === patternKey),
+    );
+  }
+
+  /**
+   * Clear all session grants for a user (called on session expiry).
+   */
+  clearSessionGrants(userId: string): void {
+    const had = this.sessionGrants.delete(userId);
+    if (had) {
+      console.log(`[hitl-gate] Cleared session grants for user ${userId}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Approval Waiting
+  // -------------------------------------------------------------------------
+
   /**
    * Create a Promise that resolves when the user makes a decision
    * or rejects when the timeout fires.
    */
-  private awaitDecision(approvalId: string, chatId: string): Promise<'approved' | 'rejected'> {
+  private awaitDecision(
+    approvalId: string,
+    chatId: string,
+    userId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+  ): Promise<'approved' | 'rejected'> {
     return new Promise<'approved' | 'rejected'>((resolve) => {
       const timer = setTimeout(() => {
         // Timeout — auto-reject
@@ -251,7 +403,7 @@ export class HITLGate {
         timer.unref();
       }
 
-      this.pendingDecisions.set(approvalId, { resolve, timer, chatId });
+      this.pendingDecisions.set(approvalId, { resolve, timer, chatId, userId, toolName, toolInput });
     });
   }
 }

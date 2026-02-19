@@ -35,6 +35,7 @@ import type {
 } from './llm-provider.js';
 import type { Dispatcher } from './dispatcher.js';
 import type { HITLGate } from './hitl-gate.js';
+import type { DomainManager } from './domain-manager.js';
 import type { ExecutorResult } from '@secureclaw/shared';
 import type { AuditLogger } from './audit.js';
 import type { SecureClawConfig } from './config.js';
@@ -441,6 +442,9 @@ export class Orchestrator {
   private calendarService: CalendarService | null = null;
   private githubService: GitHubService | null = null;
 
+  // Phase 7: Domain manager for dynamic whitelisting
+  private domainManager: DomainManager | null = null;
+
   /** All tools available — built dynamically based on connected services. */
   private allTools: ToolDefinition[] = [];
 
@@ -464,6 +468,11 @@ export class Orchestrator {
   setMemory(memoryStore: MemoryStore, promptBuilder: PromptBuilder): void {
     this.memoryStore = memoryStore;
     this.promptBuilder = promptBuilder;
+  }
+
+  /** Attach domain manager for dynamic domain whitelisting (Phase 7). */
+  setDomainManager(domainManager: DomainManager): void {
+    this.domainManager = domainManager;
   }
 
   /** Attach external services (Phase 5). Call rebuildToolList() after. */
@@ -525,7 +534,7 @@ export class Orchestrator {
       systemPrompt = this.getDefaultSystemPrompt();
     }
 
-    return this.runLoop(sessionId, messages, chatId, systemPrompt);
+    return this.runLoop(sessionId, messages, chatId, systemPrompt, userId);
   }
 
   /**
@@ -537,8 +546,9 @@ export class Orchestrator {
     messages: ChatMessage[],
     chatId: string,
     systemPrompt: string,
+    userId?: string,
   ): Promise<{ text: string; messages: ChatMessage[] }> {
-    return this.runLoop(sessionId, messages, chatId, systemPrompt);
+    return this.runLoop(sessionId, messages, chatId, systemPrompt, userId);
   }
 
   // -------------------------------------------------------------------------
@@ -550,6 +560,7 @@ export class Orchestrator {
     messages: ChatMessage[],
     chatId: string,
     systemPrompt: string,
+    userId?: string,
   ): Promise<{ text: string; messages: ChatMessage[] }> {
     const workingMessages = [...messages];
     let iterations = 0;
@@ -650,6 +661,7 @@ export class Orchestrator {
             // Service tools still go through the HITL gate
             const gateResult = await this.hitlGate.gate({
               sessionId,
+              userId: userId ?? chatId,
               toolName: toolCall.name,
               toolInput: input,
               chatId,
@@ -702,6 +714,7 @@ export class Orchestrator {
           // Gate the tool call through the HITL system
           const gateResult = await this.hitlGate.gate({
             sessionId,
+            userId: userId ?? chatId,
             toolName: toolCall.name,
             toolInput: input,
             chatId,
@@ -712,8 +725,24 @@ export class Orchestrator {
           let resultContent: string;
 
           if (gateResult.proceed) {
+            // Phase 7: Pre-flight domain check for browse_web
+            // If the domain isn't in the allowed list, ask the user for permission
+            if (toolCall.name === 'browse_web' && this.domainManager && userId) {
+              const domainResult = await this.handleDomainPreFlight(
+                input, userId, sessionId, chatId, reason, planContext,
+              );
+              if (domainResult === 'rejected') {
+                toolResults.push({
+                  type: 'tool_result',
+                  toolCallId: toolCall.id,
+                  content: 'The user declined to allow access to this domain. Try a different approach or ask the user which domains are acceptable.',
+                });
+                continue;
+              }
+            }
+
             // Approved — execute the tool (dispatcher for executor tools, or web tool)
-            const result = await this.dispatchToolCall(toolCall.name, input);
+            const result = await this.dispatchToolCall(toolCall.name, input, userId);
 
             // Audit the result
             this.auditLogger.logToolResult(sessionId, {
@@ -962,6 +991,7 @@ export class Orchestrator {
   private async dispatchToolCall(
     toolName: string,
     input: Record<string, unknown>,
+    userId?: string,
   ): Promise<ExecutorResult> {
     switch (toolName) {
       case 'run_shell_command':
@@ -1000,17 +1030,28 @@ export class Orchestrator {
           },
         });
 
-      // Phase 5: Web browsing — dispatched to the web executor container
-      case 'browse_web':
-        return this.dispatcher.execute('web', {
-          action: (input['action'] as string) || 'navigate',
-          params: {
-            url: input['url'] as string,
-            selector: input['selector'] as string | undefined,
-            text: input['text'] as string | undefined,
-            screenshot: input['screenshot'] as boolean | undefined,
+      // Phase 5+7: Web browsing — dispatched to the web executor container
+      // Use dynamic domain list from DomainManager if available
+      case 'browse_web': {
+        const allowedDomains = this.domainManager && userId
+          ? this.domainManager.getAllowedDomains(userId)
+          : undefined;
+
+        return this.dispatcher.execute(
+          'web',
+          {
+            action: (input['action'] as string) || 'navigate',
+            params: {
+              url: input['url'] as string,
+              selector: input['selector'] as string | undefined,
+              text: input['text'] as string | undefined,
+              screenshot: input['screenshot'] as boolean | undefined,
+            },
           },
-        });
+          undefined,
+          { allowedDomains },
+        );
+      }
 
       default:
         return {
@@ -1022,6 +1063,87 @@ export class Orchestrator {
           error: `Unknown tool: ${toolName}`,
         };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Domain Pre-Flight (Phase 7)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Pre-flight domain check for browse_web calls.
+   *
+   * If the target domain is already in the allowed list, returns 'approved'.
+   * If not, sends a domain-specific approval request through the HITL gate.
+   * On approval, adds the domain to the session allowlist.
+   *
+   * @returns 'approved' if the domain is allowed, 'rejected' if the user declined
+   */
+  private async handleDomainPreFlight(
+    toolInput: Record<string, unknown>,
+    userId: string,
+    sessionId: string,
+    chatId: string,
+    reason: string,
+    planContext?: string,
+  ): Promise<'approved' | 'rejected'> {
+    const url = toolInput['url'] as string | undefined;
+    if (!url || !this.domainManager) return 'approved';
+
+    let hostname: string;
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      // Invalid URL — let the executor handle the error
+      return 'approved';
+    }
+
+    // Already allowed? No pre-flight needed.
+    if (this.domainManager.isDomainAllowed(hostname, userId)) {
+      return 'approved';
+    }
+
+    console.log(`[orchestrator] Domain pre-flight: ${hostname} not in allowed list, requesting approval`);
+
+    // Send a domain-specific approval request through the HITL gate
+    const approvalRequest: import('@secureclaw/shared').ApprovalRequest = {
+      type: 'approval-request',
+      approvalId: '', // Will be set by the gate
+      toolName: 'browse_web',
+      toolInput,
+      reason: `The agent wants to visit ${hostname}, which is not on the allowed domain list.`,
+      planContext,
+      chatId,
+      metadata: {
+        type: 'domain-request',
+        domain: hostname,
+      },
+    };
+
+    // Use the HITL gate to manage the approval flow
+    // We bypass classification (already approved by the gate) and go straight to require-approval
+    const gateResult = await this.hitlGate.gate({
+      sessionId,
+      userId,
+      toolName: '__domain_request',
+      toolInput: { domain: hostname, url },
+      chatId,
+      reason: approvalRequest.reason,
+      planContext,
+      metadata: {
+        type: 'domain-request',
+        domain: hostname,
+      },
+    });
+
+    if (gateResult.proceed) {
+      // User approved — add domain to session allowlist
+      this.domainManager.addSessionDomain(userId, hostname);
+      console.log(`[orchestrator] Domain approved and added to session: ${hostname}`);
+      return 'approved';
+    }
+
+    console.log(`[orchestrator] Domain rejected: ${hostname}`);
+    return 'rejected';
   }
 
   // -------------------------------------------------------------------------

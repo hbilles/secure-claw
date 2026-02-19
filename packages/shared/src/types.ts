@@ -92,13 +92,18 @@ export interface ApprovalRequest {
   reason: string;
   planContext?: string;
   chatId: string;
+  /** Optional metadata for specialized approval UX (e.g., domain requests) */
+  metadata?: {
+    type?: 'domain-request';
+    domain?: string;
+  };
 }
 
 /** Approval decision — bridge sends to gateway after user taps inline button */
 export interface ApprovalDecision {
   type: 'approval-decision';
   approvalId: string;
-  decision: 'approved' | 'rejected';
+  decision: 'approved' | 'rejected' | 'session-approved';
 }
 
 /** Notification — gateway sends to bridge for informational messages */

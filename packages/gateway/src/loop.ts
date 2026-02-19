@@ -137,6 +137,7 @@ export class TaskLoop {
         [{ role: 'user', content: userMessage }],
         chatId,
         systemPrompt,
+        userId,
       );
 
       const responseText = result.text;

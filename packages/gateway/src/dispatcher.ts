@@ -66,6 +66,7 @@ export class Dispatcher {
     executorType: 'shell' | 'file' | 'web',
     task: TaskPayload,
     mounts?: MountConfig[],
+    options?: { allowedDomains?: string[] },
   ): Promise<ExecutorResult> {
     const executorConfig = executorType === 'shell'
       ? this.config.executors.shell
@@ -77,7 +78,11 @@ export class Dispatcher {
     const mountConfigs = executorType === 'web' ? [] : (mounts ?? this.config.mounts);
 
     // Build capability object for the token
+    // For web executor: use dynamic allowedDomains if provided, otherwise fall back to config
     const isWeb = executorType === 'web';
+    const webDomains = isWeb
+      ? (options?.allowedDomains ?? (executorConfig as WebExecutorConfig).allowedDomains ?? [])
+      : [];
     const capability: Capability = {
       executorType,
       mounts: mountConfigs.map((m): Mount => ({
@@ -86,7 +91,7 @@ export class Dispatcher {
         readOnly: m.readOnly,
       })),
       network: isWeb
-        ? { allowedDomains: (executorConfig as WebExecutorConfig).allowedDomains || [] }
+        ? { allowedDomains: webDomains }
         : 'none',
       timeoutSeconds: executorConfig.defaultTimeout,
       maxOutputBytes: executorConfig.defaultMaxOutput,

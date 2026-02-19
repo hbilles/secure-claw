@@ -40,6 +40,7 @@ import { Dispatcher } from './dispatcher.js';
 import { Orchestrator } from './orchestrator.js';
 import { ApprovalStore } from './approval-store.js';
 import { HITLGate } from './hitl-gate.js';
+import { DomainManager } from './domain-manager.js';
 import { MemoryStore } from './memory.js';
 import { PromptBuilder } from './prompt-builder.js';
 import { TaskLoop } from './loop.js';
@@ -131,6 +132,17 @@ async function main(): Promise<void> {
 
   // Attach memory to the orchestrator
   orchestrator.setMemory(memoryStore, promptBuilder);
+
+  // Phase 7: Initialize DomainManager for dynamic domain whitelisting
+  const domainManager = new DomainManager(config);
+  hitlGate.setDomainManager(domainManager);
+  orchestrator.setDomainManager(domainManager);
+
+  // Wire session expiry cleanup: clear session grants and domain additions
+  sessionManager.onSessionExpired = (userId: string) => {
+    hitlGate.clearSessionGrants(userId);
+    domainManager.clearSessionDomains(userId);
+  };
 
   // Phase 5: Initialize OAuth store and external services
   let oauthStore: OAuthStore | null = null;
