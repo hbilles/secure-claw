@@ -1,9 +1,30 @@
 # SecureClaw Configuration
-# Phase 5: Web browsing, external services, heartbeats, dashboard
+# Phase 6: Multi-provider LLM support
+
+# LLM provider configuration.
+# Supported providers: anthropic, openai, lmstudio
+#
+# Anthropic (default):
+#   provider: anthropic
+#   model: claude-sonnet-4-20250514
+#   Requires ANTHROPIC_API_KEY env var.
+#
+# OpenAI:
+#   provider: openai
+#   model: gpt-4o
+#   Requires OPENAI_API_KEY env var.
+#   Optional: baseURL for Azure OpenAI or other compatible endpoints.
+#
+# LM Studio (local):
+#   provider: lmstudio
+#   model: qwen3-235b-a22b        # Must match model loaded in LM Studio
+#   No API key needed.
+#   Default baseURL: http://host.docker.internal:1234/v1
+#   (host.docker.internal resolves to the host machine from inside Docker)
 
 llm:
-  provider: anthropic
-  model: claude-sonnet-4-20250514
+  provider: lmstudio
+  model: qwen3-235b-a22b-thinking-2507
   maxTokens: 4096
 
 executors:

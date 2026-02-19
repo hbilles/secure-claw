@@ -11,8 +11,9 @@
  *          heartbeat scheduler, web dashboard.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { SocketServer } from '@secureclaw/shared';
+import { createLLMProvider } from './providers/factory.js';
+import type { ChatMessage } from './llm-provider.js';
 import type {
   SocketRequest,
   SocketResponse,
@@ -121,8 +122,12 @@ async function main(): Promise<void> {
     (message) => socketServer.broadcast(message),
   );
 
+  // Initialize the LLM provider (Anthropic, OpenAI, or LM Studio)
+  const llmProvider = createLLMProvider(config);
+  console.log(`[gateway] LLM provider: ${llmProvider.name} (model: ${config.llm.model})`);
+
   // Initialize the orchestrator (agentic tool-use loop)
-  const orchestrator = new Orchestrator(dispatcher, hitlGate, auditLogger, config);
+  const orchestrator = new Orchestrator(llmProvider, dispatcher, hitlGate, auditLogger, config);
 
   // Attach memory to the orchestrator
   orchestrator.setMemory(memoryStore, promptBuilder);
@@ -425,7 +430,7 @@ async function main(): Promise<void> {
         const chatMessages = session.messages.map((m) => ({
           role: m.role,
           content: m.content,
-        })) as Anthropic.Messages.MessageParam[];
+        })) as ChatMessage[];
 
         // 5. Append the new user message
         chatMessages.push({

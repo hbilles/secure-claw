@@ -61,6 +61,8 @@ export interface SecureClawConfig {
     provider: string;
     model: string;
     maxTokens: number;
+    /** Custom API base URL (for LM Studio, Azure OpenAI, etc.). */
+    baseURL?: string;
   };
   executors: {
     shell: ExecutorConfig;
