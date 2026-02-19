@@ -66,7 +66,12 @@ function toOpenAIMessages(
     }));
   }
 
-  // role === 'assistant' — may contain text and/or tool calls
+  // role === 'assistant' — content can be a plain string (final text response)
+  // or ContentBlock[] (response with tool calls that was stored mid-loop)
+  if (typeof msg.content === 'string') {
+    return [{ role: 'assistant' as const, content: msg.content }];
+  }
+
   const contentBlocks = msg.content as ContentBlock[];
   const textParts: string[] = [];
   const toolCalls: ChatCompletionMessageToolCall[] = [];

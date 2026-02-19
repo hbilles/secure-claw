@@ -471,16 +471,36 @@ socketClient.on('message', async (data: unknown) => {
 async function handleApprovalRequest(request: ApprovalRequest): Promise<void> {
   const { approvalId, toolName, toolInput, reason, planContext, chatId } = request;
 
+  // Strip <think> tags from the reason (thinking models include chain-of-thought)
+  const cleanReason = reason ? cleanLLMResponse(reason) : '';
+
   // Format the approval message
   const toolSummary = formatToolSummary(toolName, toolInput);
   let messageText = `🔒 *Approval Required*\n\nThe agent wants to:\n  📝 ${toolSummary}`;
 
-  if (reason) {
-    messageText += `\n\nReason: _"${escapeMarkdown(reason)}"_`;
+  if (cleanReason) {
+    messageText += `\n\nReason: _"${escapeMarkdown(cleanReason)}"_`;
   }
 
   if (planContext) {
     messageText += `\n\nContext: ${escapeMarkdown(planContext)}`;
+  }
+
+  // Telegram has a 4096-char limit. If the message is too long (even after
+  // stripping <think>), truncate the reason to fit. Leave headroom for
+  // MarkdownV2 escaping overhead.
+  const MAX_APPROVAL_LEN = 3800;
+  if (messageText.length > MAX_APPROVAL_LEN && cleanReason) {
+    const overhead = messageText.length - escapeMarkdown(cleanReason).length;
+    const maxReasonLen = Math.max(MAX_APPROVAL_LEN - overhead - 30, 50);
+    const truncatedReason = cleanReason.slice(0, maxReasonLen) + '… (truncated)';
+
+    // Rebuild the message with the truncated reason
+    messageText = `🔒 *Approval Required*\n\nThe agent wants to:\n  📝 ${toolSummary}`;
+    messageText += `\n\nReason: _"${escapeMarkdown(truncatedReason)}"_`;
+    if (planContext) {
+      messageText += `\n\nContext: ${escapeMarkdown(planContext)}`;
+    }
   }
 
   // Build inline keyboard with Approve/Reject buttons
@@ -504,6 +524,22 @@ async function handleApprovalRequest(request: ApprovalRequest): Promise<void> {
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     console.error(`[bridge-telegram] Failed to send approval request:`, error.message);
+
+    // Fallback: try without MarkdownV2 if escaping caused issues
+    try {
+      const plainText = `🔒 Approval Required\n\nThe agent wants to: ${toolName}\n${cleanReason ? `\nReason: "${cleanReason.slice(0, 500)}"\n` : ''}`;
+      const sent = await bot.api.sendMessage(chatId, plainText, {
+        reply_markup: keyboard,
+      });
+      approvalMessages.set(approvalId, {
+        chatId,
+        messageId: sent.message_id,
+      });
+      console.log(`[bridge-telegram] Sent approval request (plain fallback): ${approvalId}`);
+    } catch (fallbackErr) {
+      const fbError = fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr));
+      console.error(`[bridge-telegram] Failed to send approval request (both attempts):`, fbError.message);
+    }
   }
 }
 
@@ -515,7 +551,7 @@ async function handleNotification(notification: BridgeNotification): Promise<voi
   const { chatId, text } = notification;
 
   try {
-    await bot.api.sendMessage(chatId, text);
+    await sendFormattedMessage(chatId, text);
     console.log(`[bridge-telegram] Sent notification to chat ${chatId}`);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -750,12 +786,7 @@ async function handleSocketResponse(response: SocketResponse): Promise<void> {
   pendingRequests.delete(requestId);
 
   try {
-    const replyToId = outgoing.replyToId ? parseInt(outgoing.replyToId, 10) : undefined;
-    await bot.api.sendMessage(
-      outgoing.chatId,
-      outgoing.content,
-      replyToId ? { reply_parameters: { message_id: replyToId } } : undefined,
-    );
+    await sendFormattedMessage(outgoing.chatId, outgoing.content, outgoing.replyToId);
     console.log(`[bridge-telegram] Sent response for request ${requestId}`);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -871,9 +902,161 @@ function formatToolSummary(toolName: string, toolInput: Record<string, unknown>)
   }
 }
 
-/** Escape special Markdown characters for Telegram. */
+/** Escape special Markdown characters for Telegram MarkdownV2. */
 function escapeMarkdown(text: string): string {
   return text.replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
+}
+
+// ---------------------------------------------------------------------------
+// LLM Response Formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip <think>...</think> blocks from LLM responses.
+ * Thinking models (e.g., Qwen) emit chain-of-thought reasoning in these tags
+ * that should not be shown to the user.
+ */
+function cleanLLMResponse(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+}
+
+/**
+ * Split a message into chunks that fit within Telegram's character limit.
+ * Tries to break at newline boundaries for cleaner splits.
+ */
+function splitMessage(text: string, limit = 4096): string[] {
+  if (text.length <= limit) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= limit) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Try to split at the last newline before the limit
+    let splitAt = remaining.lastIndexOf('\n', limit);
+    if (splitAt <= 0) splitAt = limit; // No good split point — hard cut
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^\n/, '');
+  }
+
+  return chunks;
+}
+
+/** Escape HTML special characters. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Convert standard Markdown to Telegram HTML.
+ *
+ * Handles: **bold**, *italic*, _italic_, `code`, ```code blocks```,
+ * and [links](url). Falls back gracefully — unrecognized Markdown
+ * is left as-is (just HTML-escaped).
+ *
+ * Uses Telegram HTML parse_mode which is far more forgiving than MarkdownV2.
+ */
+function markdownToTelegramHtml(text: string): string {
+  // First, extract and protect code blocks (```...```) so they aren't processed
+  const codeBlocks: string[] = [];
+  let processed = text.replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_match, code: string) => {
+    const index = codeBlocks.length;
+    codeBlocks.push(code);
+    return `\x00CODEBLOCK${index}\x00`;
+  });
+
+  // Extract and protect inline code (`...`)
+  const inlineCodes: string[] = [];
+  processed = processed.replace(/`([^`]+)`/g, (_match, code: string) => {
+    const index = inlineCodes.length;
+    inlineCodes.push(code);
+    return `\x00INLINE${index}\x00`;
+  });
+
+  // HTML-escape the rest of the text
+  processed = escapeHtml(processed);
+
+  // Convert Markdown formatting to HTML
+  // Bold: **text** or __text__
+  processed = processed.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  processed = processed.replace(/__(.+?)__/g, '<b>$1</b>');
+
+  // Italic: *text* or _text_ (but not inside words with underscores)
+  processed = processed.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, '<i>$1</i>');
+  processed = processed.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '<i>$1</i>');
+
+  // Links: [text](url)
+  processed = processed.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  // Restore code blocks
+  processed = processed.replace(/\x00CODEBLOCK(\d+)\x00/g, (_match, index: string) => {
+    return `<pre>${escapeHtml(codeBlocks[parseInt(index)]!)}</pre>`;
+  });
+
+  // Restore inline code
+  processed = processed.replace(/\x00INLINE(\d+)\x00/g, (_match, index: string) => {
+    return `<code>${escapeHtml(inlineCodes[parseInt(index)]!)}</code>`;
+  });
+
+  return processed;
+}
+
+/**
+ * Send a formatted message to Telegram, with fallback and chunking.
+ *
+ * 1. Strips <think> tags
+ * 2. Converts Markdown → Telegram HTML
+ * 3. Splits into chunks if over 4096 chars
+ * 4. Sends with parse_mode: 'HTML'
+ * 5. On failure, falls back to plain text (still with <think> stripped)
+ */
+async function sendFormattedMessage(
+  chatId: string,
+  text: string,
+  replyToId?: string,
+): Promise<void> {
+  const cleaned = cleanLLMResponse(text);
+  if (!cleaned) return;
+
+  const html = markdownToTelegramHtml(cleaned);
+  const replyParams = replyToId
+    ? { reply_parameters: { message_id: parseInt(replyToId, 10) } }
+    : undefined;
+
+  // Split into chunks if the message is too long for Telegram
+  const htmlChunks = splitMessage(html);
+
+  for (let i = 0; i < htmlChunks.length; i++) {
+    const chunk = htmlChunks[i]!;
+    // Only attach reply params to the first chunk
+    const params = i === 0 ? replyParams : undefined;
+
+    try {
+      await bot.api.sendMessage(chatId, chunk, {
+        parse_mode: 'HTML',
+        ...params,
+      });
+    } catch {
+      // Fallback: send as plain text if HTML parsing fails
+      // Use the corresponding plain-text chunk
+      const plainChunks = splitMessage(cleaned);
+      const plainChunk = plainChunks[i] ?? chunk;
+      try {
+        await bot.api.sendMessage(chatId, plainChunk, params);
+      } catch (fallbackErr) {
+        const error = fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr));
+        console.error(`[bridge-telegram] Failed to send message chunk ${i + 1}/${htmlChunks.length}:`, error.message);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

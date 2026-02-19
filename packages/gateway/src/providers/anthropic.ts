@@ -54,7 +54,12 @@ function toAnthropicMessage(
     };
   }
 
-  // role === 'assistant' — content is ContentBlock[]
+  // role === 'assistant' — content can be a plain string (final text response)
+  // or ContentBlock[] (response with tool calls that was stored mid-loop)
+  if (typeof msg.content === 'string') {
+    return { role: 'assistant', content: msg.content };
+  }
+
   const contentBlocks = msg.content as ContentBlock[];
   return {
     role: 'assistant',

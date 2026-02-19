@@ -23,8 +23,8 @@
 #   (host.docker.internal resolves to the host machine from inside Docker)
 
 llm:
-  provider: lmstudio
-  model: qwen3-235b-a22b-thinking-2507
+  provider: anthropic
+  model: claude-sonnet-4-6
   maxTokens: 4096
 
 executors:
