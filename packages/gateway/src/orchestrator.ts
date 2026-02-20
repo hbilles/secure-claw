@@ -44,6 +44,7 @@ import type { PromptBuilder } from './prompt-builder.js';
 import type { GmailService } from './services/gmail.js';
 import type { CalendarService } from './services/calendar.js';
 import type { GitHubService } from './services/github.js';
+import type { McpManager } from './mcp/manager.js';
 
 // ---------------------------------------------------------------------------
 // Tool Definitions (provider-agnostic)
@@ -450,6 +451,9 @@ export class Orchestrator {
   // Phase 7: Domain manager for dynamic whitelisting
   private domainManager: DomainManager | null = null;
 
+  // Phase 8: MCP server integration
+  private mcpManager: McpManager | null = null;
+
   /** All tools available — built dynamically based on connected services. */
   private allTools: ToolDefinition[] = [];
 
@@ -492,6 +496,12 @@ export class Orchestrator {
     this.rebuildToolList();
   }
 
+  /** Attach MCP manager for ecosystem tool integration (Phase 8). */
+  setMcpManager(mcpManager: McpManager): void {
+    this.mcpManager = mcpManager;
+    this.rebuildToolList();
+  }
+
   /** Rebuild the tool list based on connected services. */
   private rebuildToolList(): void {
     this.allTools = [...EXECUTOR_TOOLS, ...MEMORY_TOOLS, ...WEB_TOOLS];
@@ -504,6 +514,12 @@ export class Orchestrator {
     }
     if (this.githubService?.isConnected()) {
       this.allTools.push(...GITHUB_TOOLS);
+    }
+
+    // Phase 8: MCP ecosystem tools
+    if (this.mcpManager) {
+      const mcpTools = this.mcpManager.getAllTools();
+      this.allTools.push(...mcpTools);
     }
 
     console.log(`[orchestrator] ${this.allTools.length} tools available`);
@@ -707,6 +723,71 @@ export class Orchestrator {
                 approvalId: gateResult.approvalId,
               });
             }
+
+            toolResults.push({
+              type: 'tool_result',
+              toolCallId: toolCall.id,
+              content: resultContent,
+            });
+            continue;
+          }
+
+          // Phase 8: MCP ecosystem tools — executed via McpManager
+          if (this.mcpManager?.getMcpToolNames().has(toolCall.name)) {
+            const serverName = this.mcpManager.getServerName(toolCall.name);
+            const serverState = serverName
+              ? this.mcpManager.getServerStates().get(serverName)
+              : undefined;
+
+            // MCP tools go through the HITL gate with the server's default tier
+            const gateResult = await this.hitlGate.gate({
+              sessionId,
+              userId: userId ?? chatId,
+              toolName: toolCall.name,
+              toolInput: input,
+              chatId,
+              reason,
+              planContext,
+              mcpDefaultTier: serverState?.config.defaultTier,
+            });
+
+            let resultContent: string;
+
+            if (gateResult.proceed) {
+              try {
+                resultContent = await this.mcpManager.callTool(toolCall.name, input);
+                this.auditLogger.logToolResult(sessionId, {
+                  toolCallId: toolCall.id,
+                  toolName: toolCall.name,
+                  tier: gateResult.tier,
+                  success: true,
+                });
+              } catch (err) {
+                const error = err instanceof Error ? err : new Error(String(err));
+                resultContent = `Error: ${error.message}`;
+                this.auditLogger.logToolResult(sessionId, {
+                  toolCallId: toolCall.id,
+                  toolName: toolCall.name,
+                  tier: gateResult.tier,
+                  success: false,
+                  error: error.message,
+                });
+              }
+            } else {
+              resultContent = `Action rejected by the user. The user declined to approve: ${toolCall.name}. Please adjust your approach.`;
+              this.auditLogger.logToolResult(sessionId, {
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                tier: gateResult.tier,
+                success: false,
+                rejected: true,
+                approvalId: gateResult.approvalId,
+              });
+            }
+
+            console.log(
+              `[orchestrator] MCP tool result: ${toolCall.name} → ${gateResult.proceed ? 'executed' : 'rejected'} (tier: ${gateResult.tier})`,
+            );
 
             toolResults.push({
               type: 'tool_result',
@@ -1188,6 +1269,20 @@ export class Orchestrator {
     }
     if (this.githubService?.isConnected()) {
       prompt += 'GitHub is connected. You can search repos, manage issues, and create PRs.\n';
+    }
+
+    // Phase 8: MCP servers
+    if (this.mcpManager) {
+      const mcpStates = this.mcpManager.getServerStates();
+      const readyServers = [...mcpStates.entries()].filter(
+        ([, state]) => state.status === 'ready',
+      );
+      if (readyServers.length > 0) {
+        prompt += '\nMCP servers connected:\n';
+        for (const [name, state] of readyServers) {
+          prompt += `- ${name}: ${state.tools.length} tools available (prefixed "mcp_${name}__")\n`;
+        }
+      }
     }
 
     prompt +=

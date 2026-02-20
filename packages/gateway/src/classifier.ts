@@ -7,6 +7,10 @@
  * Rules are checked in order: autoApprove → notify → requireApproval.
  * Each rule matches on tool name and optional conditions (glob patterns).
  * If no rule matches, the default is 'require-approval' (fail-safe).
+ *
+ * Phase 8: Returns { tier, explicit } to distinguish explicit rule matches
+ * from the fail-safe default. This allows MCP server defaultTier to apply
+ * only when no explicit rule is configured.
  */
 
 import picomatch from 'picomatch';
@@ -17,19 +21,33 @@ import type { ActionCondition, SecureClawConfig } from './config.js';
 // Public API
 // ---------------------------------------------------------------------------
 
+/** Classification result including whether an explicit rule matched. */
+export interface ClassificationResult {
+  tier: ActionTier;
+  /**
+   * True if an explicit rule in the config matched this tool call.
+   * False if the fail-safe default was used (no rule matched).
+   *
+   * This distinction matters for MCP tools: when no explicit rule is
+   * configured, the MCP server's defaultTier should apply instead of
+   * the fail-safe require-approval.
+   */
+  explicit: boolean;
+}
+
 /**
  * Classify a tool call into an action tier based on config rules.
  *
  * @param toolName - The tool being called (e.g., 'write_file')
  * @param toolInput - The tool call arguments from the LLM
  * @param config - The loaded SecureClaw configuration
- * @returns The action tier: 'auto-approve' | 'notify' | 'require-approval'
+ * @returns The classification result with tier and whether a rule explicitly matched
  */
 export function classifyAction(
   toolName: string,
   toolInput: Record<string, unknown>,
   config: SecureClawConfig,
-): ActionTier {
+): ClassificationResult {
   const tiers: Array<{ tier: ActionTier; rules: ActionCondition[] }> = [
     { tier: 'auto-approve', rules: config.actionTiers.autoApprove },
     { tier: 'notify', rules: config.actionTiers.notify },
@@ -39,13 +57,13 @@ export function classifyAction(
   for (const { tier, rules } of tiers) {
     for (const rule of rules) {
       if (matchesRule(rule, toolName, toolInput)) {
-        return tier;
+        return { tier, explicit: true };
       }
     }
   }
 
   // Fail-safe default: require approval for any unclassified action
-  return 'require-approval';
+  return { tier: 'require-approval', explicit: false };
 }
 
 // ---------------------------------------------------------------------------

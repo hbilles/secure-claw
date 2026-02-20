@@ -31,6 +31,8 @@ services:
       - OAUTH_KEY=${OAUTH_KEY:-}
       # Phase 5: Heartbeat user (first allowed user ID)
       - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
+      # Phase 8: MCP proxy port for domain-filtered outbound from MCP containers
+      - MCP_PROXY_PORT=${MCP_PROXY_PORT:-0}
     ports:
       # Phase 5: Web dashboard (localhost-only)
       - "127.0.0.1:3333:3333"
@@ -85,6 +87,16 @@ services:
       context: .
       dockerfile: packages/executor-web/Dockerfile
     image: secureclaw-executor-web
+    profiles:
+      - build
+
+  # Phase 8: MCP executor — generic base image for MCP servers.
+  # Long-lived containers created by McpContainerManager at Gateway startup.
+  executor-mcp:
+    build:
+      context: .
+      dockerfile: packages/executor-mcp/Dockerfile
+    image: secureclaw-executor-mcp
     profiles:
       - build
 

@@ -51,6 +51,8 @@ import { CalendarService } from './services/calendar.js';
 import { GitHubService } from './services/github.js';
 import { HeartbeatScheduler } from './scheduler.js';
 import { startDashboard, broadcastSSE } from './dashboard.js';
+// Phase 8: MCP server integration
+import { McpProxy, McpContainerManager, McpManager } from './mcp/index.js';
 
 // ---------------------------------------------------------------------------
 // Heuristic: Is a request "complex" enough for the Ralph Wiggum loop?
@@ -173,6 +175,60 @@ async function main(): Promise<void> {
     const error = err instanceof Error ? err : new Error(String(err));
     console.warn(`[gateway] OAuth store not available: ${error.message}`);
     console.warn('[gateway] External services (Gmail, Calendar, GitHub) will be disabled');
+  }
+
+  // Phase 8: Initialize MCP server integration
+  let mcpProxy: McpProxy | null = null;
+  let mcpManager: McpManager | null = null;
+
+  const mcpConfigs = (config.mcpServers ?? []).filter((c) => c.enabled !== false);
+  if (mcpConfigs.length > 0 && dockerAvailable) {
+    try {
+      // Start MCP proxy if any servers need network access
+      const needsProxy = mcpConfigs.some(
+        (c) => c.allowedDomains && c.allowedDomains.length > 0,
+      );
+
+      if (needsProxy) {
+        const proxyPort = parseInt(process.env['MCP_PROXY_PORT'] ?? '0', 10);
+        mcpProxy = new McpProxy({ port: proxyPort }, (event) => {
+          auditLogger.log({
+            timestamp: new Date(),
+            type: 'mcp_proxy',
+            sessionId: 'mcp',
+            data: { ...event, timestamp: event.timestamp.toISOString() },
+          });
+        });
+        await mcpProxy.start();
+        console.log(`[gateway] MCP proxy started on ${mcpProxy.getAddress()}`);
+      }
+
+      // Create container manager with Docker instance from dispatcher
+      const mcpContainerManager = new McpContainerManager(
+        dispatcher.getDocker(),
+        mcpProxy,
+      );
+
+      // Create manager and start all configured MCP servers
+      mcpManager = new McpManager(mcpContainerManager, auditLogger);
+      await mcpManager.startAll(mcpConfigs);
+
+      // Wire to orchestrator
+      orchestrator.setMcpManager(mcpManager);
+
+      // Report status
+      const readyCount = [...mcpManager.getServerStates().values()].filter(
+        (s) => s.status === 'ready',
+      ).length;
+      const totalTools = mcpManager.getAllTools().length;
+      console.log(
+        `[gateway] MCP: ${readyCount}/${mcpConfigs.length} server(s) ready, ${totalTools} tool(s) available`,
+      );
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      console.error(`[gateway] MCP initialization failed: ${error.message}`);
+      console.warn('[gateway] MCP tools will not be available');
+    }
   }
 
   // Phase 4: Initialize the Ralph Wiggum task loop
@@ -566,6 +622,14 @@ async function main(): Promise<void> {
     heartbeatScheduler.stop();
     if (dashboardServer) {
       dashboardServer.close();
+    }
+    // Phase 8: Stop MCP servers and proxy
+    if (mcpManager) {
+      console.log('[gateway] Stopping MCP servers...');
+      await mcpManager.stopAll();
+    }
+    if (mcpProxy) {
+      mcpProxy.stop();
     }
     await socketServer.stop();
     sessionManager.dispose();

@@ -28,19 +28,22 @@ A security-first personal AI agent framework in TypeScript. Security boundaries 
 │ │ Orchestrator · LLM client · HITL gate · dispatcher · memory   │   │
 │ │ prompt builder · task loop · scheduler · audit logger         │   │
 │ │ services: Gmail, Calendar, GitHub (OAuth, in-process)         │   │
+│ │ MCP manager · MCP proxy (domain-filtering HTTPS CONNECT)      │   │
 │ └───────────────────────────────────────────────────────────────┘   │
 │       Docker API             Docker API            Docker API       │
 ├─────────────────────────────────────────────────────────────────────┤
-│ EXECUTORS (ephemeral containers)                                    │
-│ ┌────────────────┐  ┌────────────────┐  ┌────────────────────────┐  │
-│ │ Shell          │  │ File           │  │ Web                    │  │
-│ │ Alpine, no net │  │ Scoped mounts  │  │ Playwright + Chromium  │  │
-│ │ r/o by default │  │ no network     │  │ DNS/iptables/SSRF      │  │
-│ └────────────────┘  └────────────────┘  └────────────────────────┘  │
+│ EXECUTORS (ephemeral containers)         MCP SERVERS (long-lived)   │
+│ ┌──────────┐ ┌──────────┐ ┌──────────┐  ┌──────────┐ ┌──────────┐   │
+│ │ Shell    │ │ File     │ │ Web      │  │ MCP (fs) │ │ MCP (net)│   │
+│ │ no net   │ │ no net   │ │ iptables │  │ no net   │ │ proxy    │   │
+│ │ per-task │ │ per-task │ │ per-task │  │ stdio    │ │ only     │   │
+│ └──────────┘ └──────────┘ └──────────┘  └──────────┘ └────┬─────┘   │
+│                                                           │ HTTPS   │
+│                                                    MCP Proxy ──▶ ☁  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-The Gateway is the only process with LLM API keys, the Docker socket, and outbound internet access. Executors are created on-demand as containers, given a capability token, and removed after execution.
+The Gateway is the only process with LLM API keys, the Docker socket, and outbound internet access. Executor containers are created on-demand, given a capability token, and removed after execution. MCP server containers are long-lived — they start at Gateway boot and stay running across tool calls, communicating via JSON-RPC over stdio.
 
 ## Project Structure
 
@@ -69,11 +72,17 @@ secure-claw/
 │   │       │   ├── anthropic.ts     # Anthropic Messages API
 │   │       │   ├── openai.ts        # OpenAI Chat Completions API
 │   │       │   └── codex.ts         # OpenAI Codex via Responses API
-│   │       └── services/
-│   │           ├── gmail.ts         # Gmail API (search, read, send, reply)
-│   │           ├── calendar.ts      # Google Calendar API (list, create, update)
-│   │           ├── github.ts        # GitHub API (repos, issues, PRs, file read)
-│   │           └── oauth.ts         # OAuth flow + encrypted token storage
+│   │       ├── services/
+│   │       │   ├── gmail.ts         # Gmail API (search, read, send, reply)
+│   │       │   ├── calendar.ts      # Google Calendar API (list, create, update)
+│   │       │   ├── github.ts        # GitHub API (repos, issues, PRs, file read)
+│   │       │   └── oauth.ts         # OAuth flow + encrypted token storage
+│   │       └── mcp/
+│   │           ├── index.ts         # Barrel export
+│   │           ├── proxy.ts         # HTTP CONNECT proxy with domain filtering
+│   │           ├── container.ts     # Docker lifecycle for long-lived MCP containers
+│   │           ├── client.ts        # MCP SDK wrapper for Docker attach streams
+│   │           └── manager.ts       # Central coordinator — discovery, routing, lifecycle
 │   │
 │   ├── bridge-telegram/     # Telegram ↔ Gateway adapter
 │   │   └── src/
@@ -93,6 +102,10 @@ secure-claw/
 │   │       ├── index.ts             # Playwright automation, structured/legacy web extraction
 │   │       ├── dns-proxy.ts         # DNS resolver with domain allowlist
 │   │       └── accessibility-tree.ts
+│   │
+│   ├── executor-mcp/        # Base image for MCP servers
+│   │   ├── Dockerfile               # node:22 + iptables + gosu + tini
+│   │   └── entrypoint-mcp.sh       # iptables lockdown + privilege drop
 │   │
 │   └── shared/              # Shared types and utilities
 │       └── src/
@@ -126,7 +139,10 @@ User (Telegram) → Bridge → Gateway → LLM → [tool calls] → Executors �
 
    If the user selects **Allow for Session** on an approval request, future matching actions in the same session are automatically downgraded to `notify` tier.
 
-4. **Execute** — The Gateway's Dispatcher creates an ephemeral Docker container for the appropriate executor, passing a JWT capability token and the task payload. The container starts, validates the token, executes the operation, writes a JSON result to stdout, and exits. The Dispatcher reads the result and removes the container. Service tools (Gmail, Calendar, GitHub) execute in-process within the Gateway using OAuth tokens.
+4. **Execute** — Tool calls are routed by type:
+   - **Executor tools** (shell, file, web): The Dispatcher creates an ephemeral Docker container, passing a JWT capability token and the task payload. The container validates the token, executes, returns a result, and is removed.
+   - **Service tools** (Gmail, Calendar, GitHub): Execute in-process within the Gateway using OAuth tokens.
+   - **MCP tools** (prefixed `mcp_{server}__`): Routed through the McpManager, which sends JSON-RPC requests over Docker attach stdio to the appropriate long-lived MCP server container and returns the result.
 
 5. **Respond** — Tool results are fed back to the LLM for synthesis. The loop repeats (up to 10 iterations) until the LLM responds with plain text. The final response flows back through the bridge to Telegram. Every step is logged to the append-only audit trail.
 
@@ -173,6 +189,10 @@ The LLM has access to these tools, each routed through the HITL gate:
 | `read_file_github` | In-process | Read a file from a GitHub repo |
 | `create_issue` | In-process | Create GitHub issue (requires approval) |
 | `create_pr` | In-process | Create GitHub PR (requires approval) |
+
+### MCP Ecosystem Tools
+
+In addition to the built-in tools above, SecureClaw can dynamically discover tools from MCP (Model Context Protocol) servers configured in `secureclaw.yaml`. Each MCP server's tools are prefixed with `mcp_{serverName}__` to avoid collisions (e.g., `mcp_github__list_issues`, `mcp_slack__post_message`). MCP tools go through the same HITL gate as all other tools — each server has a configurable `defaultTier` that applies when no explicit YAML rule matches.
 
 ### `browse_web` Output Contract
 
@@ -231,6 +251,8 @@ Every executor runs in a separate Docker container with:
 
 - Shell and File executors: `--network=none` (no network at all)
 - Web executor: iptables rules allowing only TCP 443 to resolved IPs of explicitly allowed domains. Private IP ranges (10.x, 172.16.x, 192.168.x) are blocked to prevent SSRF. DNS resolution goes through a custom proxy that enforces the domain allowlist.
+- MCP servers (no network): `--network=none`, same as shell/file executors
+- MCP servers (with network): iptables restrict all outbound to the Gateway's MCP proxy only. The proxy is an HTTP CONNECT proxy that filters each HTTPS tunnel request against the server's per-container domain allowlist. Direct outbound (bypassing the proxy) is impossible — iptables DROP rule blocks everything except loopback, DNS, and the proxy address.
 - Gateway: Outbound HTTPS only (LLM API, Google APIs, GitHub API)
 - Bridge: Outbound to Telegram API only
 
@@ -246,7 +268,7 @@ The executor runtime validates the token before executing anything.
 
 ### L4 — Human-in-the-Loop Gate
 
-Actions are classified by the Gateway in code, not by the LLM. The classification rules in `secureclaw.yaml` match on tool name and input field patterns (e.g., path glob, working directory). If no rule matches, the default is **require-approval** (fail-safe). Approval requests are sent to Telegram with three options: **Approve** (one-time), **Allow for Session** (auto-approve matching actions for the remainder of the session), or **Reject**. Session grants expire when the user's session ends.
+Actions are classified by the Gateway in code, not by the LLM. The classification rules in `secureclaw.yaml` match on tool name and input field patterns (e.g., path glob, working directory). If no rule matches, the default is **require-approval** (fail-safe). For MCP tools, the priority chain is: explicit YAML rule > server's `defaultTier` config > fail-safe `require-approval`. Approval requests are sent to Telegram with three options: **Approve** (one-time), **Allow for Session** (auto-approve matching actions for the remainder of the session), or **Reject**. Session grants expire when the user's session ends.
 
 Web content trust boundary:
 - Structured `browse_web` payloads include explicit untrusted-content markers in the `security` field.
@@ -267,6 +289,7 @@ ANTHROPIC_API_KEY=sk-ant-...        # For anthropic provider
 OPENAI_API_KEY=sk-...               # For openai or codex provider
 CAPABILITY_SECRET=random-secret    # Signs executor capability tokens
 OAUTH_KEY=encryption-passphrase   # Optional — encrypts OAuth tokens at rest
+MCP_PROXY_PORT=0                  # Optional — MCP proxy listen port (0 = OS-assigned)
 ```
 
 ### `config/secureclaw.yaml`
@@ -280,6 +303,7 @@ Controls the entire system:
 - **`trustedDomains`** — Base domains that downgrade `browse_web` from require-approval to notify tier. Additional domains can be approved dynamically at runtime — when the agent visits an unlisted domain, the user is prompted to allow it for the session.
 - **`heartbeats`** — Cron schedules for proactive agent triggers with prompt templates.
 - **`oauth`** — Google and GitHub OAuth client credentials for service integrations.
+- **`mcpServers`** — MCP server definitions. Each entry specifies a Docker image, command, optional allowed domains (for network access through the proxy), environment variables (`"from_env"` resolves from host env), mounts, resource limits, a `defaultTier` for HITL classification, and tool filters (`includeTools`, `excludeTools`, `maxTools`).
 
 ## Getting Started
 
@@ -359,5 +383,6 @@ To enable Gmail, Calendar, or GitHub integrations:
 | Browser automation | Playwright (Chromium) |
 | Google APIs | googleapis (Gmail, Calendar) |
 | GitHub API | @octokit/rest |
+| MCP | @modelcontextprotocol/sdk (JSON-RPC over stdio) |
 | IPC | Unix domain sockets (JSON-lines) |
 | Auth | JWT (capability tokens), AES-256-GCM (OAuth storage) |

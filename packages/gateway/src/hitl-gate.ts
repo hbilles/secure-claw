@@ -43,6 +43,12 @@ export interface GateParams {
     type?: 'domain-request';
     domain?: string;
   };
+  /**
+   * Default HITL tier for MCP tools (from server config).
+   * Applied only when no explicit rule is configured in actionTiers.
+   * Priority: explicit YAML rule > mcpDefaultTier > fail-safe require-approval.
+   */
+  mcpDefaultTier?: ActionTier;
 }
 
 type SendToBridgeFn = (message: ApprovalRequest | BridgeNotification | ApprovalExpired) => void;
@@ -114,10 +120,16 @@ export class HITLGate {
    * or { proceed: false } if the user rejected or the approval expired.
    */
   async gate(params: GateParams): Promise<GateResult> {
-    const { sessionId, userId, toolName, toolInput, chatId, reason, planContext, metadata } = params;
+    const { sessionId, userId, toolName, toolInput, chatId, reason, planContext, metadata, mcpDefaultTier } = params;
 
     // 1. Classify the action
-    let tier = classifyAction(toolName, toolInput, this.config);
+    const classification = classifyAction(toolName, toolInput, this.config);
+    let tier = classification.tier;
+
+    // Phase 8: Apply MCP server's defaultTier when no explicit rule matched
+    if (!classification.explicit && mcpDefaultTier) {
+      tier = mcpDefaultTier;
+    }
 
     // Phase 5: Override for trusted web domains
     // browse_web calls to trusted domains use "notify" tier instead of "require-approval"
@@ -457,7 +469,18 @@ function summarizeAction(toolName: string, toolInput: Record<string, unknown>): 
       return `Creating PR in ${toolInput['repo'] ?? 'unknown'}: "${toolInput['title'] ?? ''}"`;
     case 'read_file_github':
       return `Reading file from ${toolInput['repo'] ?? 'unknown'}: ${toolInput['path'] ?? 'unknown'}`;
-    default:
+    default: {
+      // Phase 8: MCP tools — parse prefix for readable summaries
+      if (toolName.startsWith('mcp_') && toolName.includes('__')) {
+        const withoutPrefix = toolName.slice(4); // strip "mcp_"
+        const separatorIndex = withoutPrefix.indexOf('__');
+        if (separatorIndex !== -1) {
+          const serverName = withoutPrefix.slice(0, separatorIndex);
+          const mcpToolName = withoutPrefix.slice(separatorIndex + 2);
+          return `[${serverName}] ${mcpToolName}: ${JSON.stringify(toolInput).slice(0, 80)}`;
+        }
+      }
       return JSON.stringify(toolInput).slice(0, 100);
+    }
   }
 }

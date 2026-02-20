@@ -24,7 +24,7 @@
 #
 # Codex (OpenAI Responses API):
 #   provider: codex
-#   model: codex-mini-latest       # or gpt-5-codex, gpt-5.1-codex, gpt-5.2-codex
+#   model: codex-mini-latest       # or gpt-5-codex, gpt-5.1-codex, gpt-5.2-codex, gpt-5.2-2025-12-11
 #   Requires OPENAI_API_KEY env var (same key as OpenAI provider).
 #   Optional: baseURL for compatible endpoints.
 #   Optional: reasoningEffort: low | medium | high
@@ -164,6 +164,44 @@ heartbeats:
 # GitHub repos owned by the user (read_file_github auto-approves for these).
 ownGitHubRepos: []
   # - yourusername/yourrepo
+
+# MCP server configurations (optional).
+# Each MCP server runs in its own Docker container with strict security controls.
+# Tools are prefixed with "mcp_{name}__" to avoid collisions with built-in tools.
+#
+# Servers with allowedDomains get proxied network access through the Gateway's
+# domain-filtering forward proxy. Servers without allowedDomains run with
+# --network=none (no network access at all).
+#
+# Environment variables: values set to "from_env" are resolved from the Gateway's
+# process.env at container start time. Never put secrets directly in this file.
+mcpServers: []
+  # Example: GitHub MCP server (needs network)
+  # - name: github
+  #   image: secureclaw-executor-mcp
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-github"]
+  #   env:
+  #     GITHUB_PERSONAL_ACCESS_TOKEN: from_env
+  #   transport: stdio
+  #   allowedDomains:
+  #     - api.github.com
+  #     - github.com
+  #   defaultTier: require-approval
+  #   maxTools: 20
+  #
+  # Example: Filesystem MCP server (no network)
+  # - name: filesystem
+  #   image: secureclaw-executor-mcp
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+  #   transport: stdio
+  #   mounts:
+  #     - name: workspace
+  #       hostPath: ~/projects
+  #       containerPath: /workspace
+  #       readOnly: true
+  #   defaultTier: auto-approve
 
 # OAuth service configurations (optional).
 # Set client ID and secret for each service you want to connect.

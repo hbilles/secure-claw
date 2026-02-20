@@ -13,13 +13,14 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "openai": "^4.76.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "@octokit/rest": "^21.0.0",
     "@secureclaw/shared": "*",
     "better-sqlite3": "^11.0.0",
     "cron-parser": "^4.9.0",
     "dockerode": "^4.0.9",
     "googleapis": "^144.0.0",
+    "openai": "^4.76.0",
     "picomatch": "^4.0.0",
     "uuid": "^11.0.0",
     "yaml": "^2.8.2"

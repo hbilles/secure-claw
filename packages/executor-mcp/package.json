@@ -1,0 +1,6 @@
+{
+  "name": "@secureclaw/executor-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic base Docker image for MCP (Model Context Protocol) servers"
+}

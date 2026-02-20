@@ -48,7 +48,9 @@ export interface AuditEntry {
     | 'tool_result'
     | 'action_classified'
     | 'approval_requested'
-    | 'approval_resolved';
+    | 'approval_resolved'
+    | 'mcp_proxy'
+    | 'mcp_tool_call';
   sessionId: string;
   data: Record<string, unknown>;
 }

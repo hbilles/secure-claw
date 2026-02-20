@@ -26,7 +26,7 @@ export interface Mount {
 }
 
 export interface Capability {
-  executorType: 'shell' | 'file' | 'web';
+  executorType: 'shell' | 'file' | 'web' | 'mcp';
   mounts: Mount[];
   network: 'none' | { allowedDomains: string[] };
   timeoutSeconds: number;

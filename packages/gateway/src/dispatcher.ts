@@ -52,6 +52,14 @@ export class Dispatcher {
   }
 
   /**
+   * Get the Docker instance for shared use by other managers.
+   * Phase 8: Used by McpContainerManager for MCP server containers.
+   */
+  getDocker(): Docker {
+    return this.docker;
+  }
+
+  /**
    * Execute a task in a sandboxed Docker container.
    *
    * Security constraints applied to every container:

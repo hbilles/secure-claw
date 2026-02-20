@@ -8,12 +8,14 @@
  * - Warnings for missing host paths (expected in Docker)
  *
  * Phase 5: Added web executor config, heartbeats, trustedDomains, service config.
+ * Phase 8: Added MCP server configuration for ecosystem tool integration.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { parse as parseYAML } from 'yaml';
+import type { ActionTier } from '@secureclaw/shared';
 
 // ---------------------------------------------------------------------------
 // Configuration Types
@@ -59,6 +61,55 @@ export interface OAuthServiceConfig {
   callbackPort: number;
 }
 
+/**
+ * Configuration for an MCP (Model Context Protocol) server.
+ *
+ * Each MCP server runs in its own Docker container with strict security
+ * controls. Tools are prefixed with "mcp_{name}__" to avoid collisions.
+ *
+ * Servers with allowedDomains get proxied network access through the
+ * Gateway's domain-filtering forward proxy. Servers without allowedDomains
+ * run with --network=none (no network access at all).
+ */
+export interface McpServerConfig {
+  /** Unique name for this MCP server (used as tool name prefix). */
+  name: string;
+  /** Docker image to use (must have the MCP server installed). */
+  image: string;
+  /** Command to run inside the container (e.g., "npx"). */
+  command: string;
+  /** Arguments to the command (e.g., ["-y", "@modelcontextprotocol/server-github"]). */
+  args?: string[];
+  /**
+   * Environment variables to inject into the container.
+   * Values set to "from_env" are resolved from the Gateway's process.env.
+   * This prevents plaintext secrets in the YAML config.
+   */
+  env?: Record<string, string>;
+  /** Transport protocol. Only "stdio" is supported initially. */
+  transport: 'stdio';
+  /** Domains this MCP server is allowed to access. Empty or absent = --network=none. */
+  allowedDomains?: string[];
+  /** Optional mount configs for filesystem-based MCP servers. */
+  mounts?: MountConfig[];
+  /** Container memory limit (default: '512m'). */
+  memoryLimit?: string;
+  /** Container CPU limit (default: 1). */
+  cpuLimit?: number;
+  /** Per-tool-call timeout in seconds (default: 60). */
+  toolTimeout?: number;
+  /** Default HITL tier for all tools from this server (default: 'require-approval'). */
+  defaultTier?: ActionTier;
+  /** Maximum number of tools to expose to the LLM (default: 30). */
+  maxTools?: number;
+  /** If set, only expose these specific tool names from the server. */
+  includeTools?: string[];
+  /** Exclude these specific tool names from the server. */
+  excludeTools?: string[];
+  /** Whether this server is enabled (default: true). */
+  enabled?: boolean;
+}
+
 export interface SecureClawConfig {
   llm: {
     provider: string;
@@ -91,6 +142,8 @@ export interface SecureClawConfig {
     google?: OAuthServiceConfig;
     github?: OAuthServiceConfig;
   };
+  /** MCP server configurations (optional). */
+  mcpServers?: McpServerConfig[];
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +233,27 @@ export function loadConfig(configPath?: string): SecureClawConfig {
     config.ownGitHubRepos = [];
   }
 
+  // Defaults for Phase 8 (MCP servers)
+  if (!config.mcpServers) {
+    config.mcpServers = [];
+  }
+  for (const server of config.mcpServers) {
+    server.enabled = server.enabled ?? true;
+    server.transport = server.transport ?? 'stdio';
+    server.defaultTier = server.defaultTier ?? 'require-approval';
+    server.maxTools = server.maxTools ?? 30;
+    server.memoryLimit = server.memoryLimit ?? '512m';
+    server.cpuLimit = server.cpuLimit ?? 1;
+    server.toolTimeout = server.toolTimeout ?? 60;
+
+    // Resolve ~ in MCP server mount paths
+    if (server.mounts) {
+      for (const mount of server.mounts) {
+        mount.hostPath = resolveTilde(mount.hostPath);
+      }
+    }
+  }
+
   console.log(`[config] Configuration loaded:`);
   console.log(`[config]   LLM model: ${config.llm.model}`);
   console.log(`[config]   Mounts: ${config.mounts.map((m) => `${m.name} (${m.hostPath} → ${m.containerPath}${m.readOnly ? ', ro' : ''})`).join(', ')}`);
@@ -191,6 +265,12 @@ export function loadConfig(configPath?: string): SecureClawConfig {
   );
   console.log(`[config]   Trusted domains: ${config.trustedDomains.length > 0 ? config.trustedDomains.join(', ') : '(none)'}`);
   console.log(`[config]   Heartbeats: ${config.heartbeats.length} (${config.heartbeats.filter((h) => h.enabled).length} enabled)`);
+  const enabledMcp = config.mcpServers.filter((s) => s.enabled);
+  if (enabledMcp.length > 0) {
+    console.log(
+      `[config]   MCP servers: ${enabledMcp.map((s) => `${s.name} (${s.image}, tier=${s.defaultTier})`).join(', ')}`,
+    );
+  }
 
   return config;
 }
