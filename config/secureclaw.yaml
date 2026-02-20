@@ -113,11 +113,32 @@ actionTiers:
     - tool: search_repos
     - tool: list_issues
     - tool: read_file_github
+    # Phase 8: Fastmail MCP — read-only operations
+    - tool: mcp_fastmail__get_recent_emails
+    - tool: mcp_fastmail__get_email
+    - tool: mcp_fastmail__get_email_thread
+    - tool: mcp_fastmail__search_emails
+    - tool: mcp_fastmail__advanced_search
+    - tool: mcp_fastmail__list_mailboxes
+    - tool: mcp_fastmail__get_mailbox_stats
+    - tool: mcp_fastmail__get_account_summary
+    - tool: mcp_fastmail__list_contacts
+    - tool: mcp_fastmail__get_contact
+    - tool: mcp_fastmail__search_contacts
+    - tool: mcp_fastmail__list_calendars
+    - tool: mcp_fastmail__list_calendar_events
+    - tool: mcp_fastmail__get_calendar_event
+    - tool: mcp_fastmail__list_identities
+    - tool: mcp_fastmail__check_capabilities
 
   notify:
     - tool: write_file
       conditions:
         path: /sandbox/**
+    # Phase 8: Fastmail MCP — low-risk state changes (notify only)
+    - tool: mcp_fastmail__mark_email_read
+    - tool: mcp_fastmail__mark_email_unread
+    - tool: mcp_fastmail__bulk_mark_read
     # Phase 5: Browse trusted domains (notify instead of require-approval)
     # browse_web on untrusted domains falls through to require-approval
 
@@ -137,6 +158,13 @@ actionTiers:
     - tool: create_pr
     # Phase 5: Web browsing (default tier — all browse_web calls)
     - tool: browse_web
+    # Phase 8: Fastmail MCP — mutating operations always require approval
+    - tool: mcp_fastmail__send_email
+    - tool: mcp_fastmail__delete_email
+    - tool: mcp_fastmail__bulk_delete_emails
+    - tool: mcp_fastmail__move_email
+    - tool: mcp_fastmail__bulk_move_emails
+    - tool: mcp_fastmail__create_calendar_event
 
 # Domains trusted for web browsing.
 # browse_web calls to these domains use the "notify" tier instead of "require-approval".
@@ -175,7 +203,20 @@ ownGitHubRepos: []
 #
 # Environment variables: values set to "from_env" are resolved from the Gateway's
 # process.env at container start time. Never put secrets directly in this file.
-mcpServers: []
+mcpServers:
+  - name: fastmail
+    image: secureclaw-executor-mcp
+    command: npx
+    args: ["--yes", "github:MadLlama25/fastmail-mcp", "fastmail-mcp"]
+    env:
+      FASTMAIL_API_TOKEN: from_env
+      FASTMAIL_BASE_URL: "https://api.fastmail.com"
+    transport: stdio
+    allowedDomains:
+      - api.fastmail.com
+    defaultTier: require-approval
+    maxTools: 30
+
   # Example: GitHub MCP server (needs network)
   # - name: github
   #   image: secureclaw-executor-mcp
