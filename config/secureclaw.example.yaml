@@ -25,7 +25,7 @@
 # Codex (OpenAI Responses API):
 #   provider: codex
 #   model: gpt-5-codex             # Codex OAuth mode requires a Codex model
-#                                  # (e.g., gpt-5-codex, gpt-5.1-codex, gpt-5.2-codex)
+#                                  # (e.g., gpt-5-codex, gpt-5.1-codex, gpt-5.2-codex, gpt-5.3-codex)
 #   Auth mode options:
 #   - codexAuthMode: api-key (default; requires OPENAI_API_KEY)
 #   - codexAuthMode: oauth (requires oauth.openaiCodex.clientId + /connect codex)
