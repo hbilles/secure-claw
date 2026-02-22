@@ -15,6 +15,8 @@
 # The actual MCP server command is provided at container creation time
 # via the Cmd override from McpContainerManager.
 
+FROM ghcr.io/github/github-mcp-server:latest AS github-mcp
+
 FROM node:22-bookworm-slim
 
 # Install iptables for network-mode containers and common utilities.
@@ -39,6 +41,9 @@ RUN chmod +x /usr/local/bin/entrypoint-mcp.sh
 # This eliminates runtime npx downloads and reduces required network domains.
 COPY vendor/fastmail-mcp /opt/fastmail-mcp
 RUN cd /opt/fastmail-mcp && npm install --ignore-scripts && npm run build && npm cache clean --force
+
+# Copy official GitHub MCP server binary from upstream image.
+COPY --from=github-mcp /server/github-mcp-server /opt/mcp-github/github-mcp-server
 
 # Create a working directory owned by node
 RUN mkdir -p /mcp && chown node:node /mcp

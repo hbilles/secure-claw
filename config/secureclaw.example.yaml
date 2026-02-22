@@ -225,8 +225,8 @@ mcpServers:
   # Example: GitHub MCP server (needs network)
   # - name: github
   #   image: secureclaw-executor-mcp
-  #   command: npx
-  #   args: ["-y", "@modelcontextprotocol/server-github"]
+  #   command: /opt/mcp-github/github-mcp-server
+  #   args: ["stdio"]
   #   env:
   #     GITHUB_PERSONAL_ACCESS_TOKEN: from_env
   #   transport: stdio

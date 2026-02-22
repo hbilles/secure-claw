@@ -534,6 +534,14 @@ bot.on('callback_query:data', async (ctx) => {
 socketClient.on('message', async (data: unknown) => {
   const raw = data as Record<string, unknown>;
 
+  // Ignore messages destined for non-Telegram chats (e.g. web dashboard).
+  // The gateway broadcasts to all bridges; skip messages with non-numeric chat IDs
+  // since Telegram chat IDs are always numeric.
+  const msgChatId = (raw['chatId'] ?? (raw['outgoing'] as Record<string, unknown> | undefined)?.['chatId']) as string | undefined;
+  if (msgChatId && !/^-?\d+$/.test(msgChatId)) {
+    return;
+  }
+
   // Route based on message type
   switch (raw['type']) {
     case 'approval-request':

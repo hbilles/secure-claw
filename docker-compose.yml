@@ -35,6 +35,7 @@ services:
       - MCP_PROXY_PORT=${MCP_PROXY_PORT:-0}
       # Phase 8: MCP server credentials (resolved by "from_env" in secureclaw.yaml)
       - FASTMAIL_API_TOKEN=${FASTMAIL_API_TOKEN:-}
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PERSONAL_ACCESS_TOKEN:-}
       # Dashboard: bind to all interfaces inside the container so Docker
       # port forwarding works. Host-side access is still localhost-only via
       # the port mapping below (127.0.0.1:3333:3333).

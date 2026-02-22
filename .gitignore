@@ -11,3 +11,7 @@ vendor/*/package-lock.json
 
 # Local runtime config (contains environment-specific values and may contain secrets)
 config/secureclaw.yaml
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
