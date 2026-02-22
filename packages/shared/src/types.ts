@@ -253,6 +253,48 @@ export interface HeartbeatTriggered {
   name: string;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 9: Auth Control Protocol
+// ---------------------------------------------------------------------------
+
+export type AuthServiceName = 'codex';
+
+/** Auth connect request — bridge asks gateway to start or complete OAuth login. */
+export interface AuthConnectRequest {
+  type: 'auth-connect';
+  userId: string;
+  chatId: string;
+  service: AuthServiceName;
+  /** Optional callback URL/code paste (manual completion path). */
+  callbackInput?: string;
+}
+
+/** Auth status request — bridge asks gateway for connection status. */
+export interface AuthStatusRequest {
+  type: 'auth-status';
+  userId: string;
+  chatId: string;
+  service: AuthServiceName;
+}
+
+/** Auth disconnect request — bridge asks gateway to remove stored token. */
+export interface AuthDisconnectRequest {
+  type: 'auth-disconnect';
+  userId: string;
+  chatId: string;
+  service: AuthServiceName;
+}
+
+/** Auth response — gateway returns connect/status/disconnect result. */
+export interface AuthResponse {
+  type: 'auth-response';
+  chatId: string;
+  service: AuthServiceName;
+  action: 'connect' | 'status' | 'disconnect';
+  success: boolean;
+  message: string;
+}
+
 /** Union of all gateway → bridge message types */
 export type GatewayToBridgeMessage =
   | SocketResponse
@@ -267,7 +309,9 @@ export type GatewayToBridgeMessage =
   // Phase 5
   | HeartbeatListResponse
   | HeartbeatToggleResponse
-  | HeartbeatTriggered;
+  | HeartbeatTriggered
+  // Phase 9
+  | AuthResponse;
 
 /** Union of all bridge → gateway message types */
 export type BridgeToGatewayMessage =
@@ -279,4 +323,8 @@ export type BridgeToGatewayMessage =
   | TaskStopRequest
   // Phase 5
   | HeartbeatListRequest
-  | HeartbeatToggleRequest;
+  | HeartbeatToggleRequest
+  // Phase 9
+  | AuthConnectRequest
+  | AuthStatusRequest
+  | AuthDisconnectRequest;

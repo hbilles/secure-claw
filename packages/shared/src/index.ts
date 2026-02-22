@@ -29,6 +29,12 @@ export type {
   HeartbeatToggleRequest,
   HeartbeatToggleResponse,
   HeartbeatTriggered,
+  // Phase 9
+  AuthServiceName,
+  AuthConnectRequest,
+  AuthStatusRequest,
+  AuthDisconnectRequest,
+  AuthResponse,
 } from './types.js';
 
 export type {

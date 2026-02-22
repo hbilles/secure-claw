@@ -9,7 +9,14 @@ import { AnthropicProvider } from './anthropic.js';
 import { CodexProvider } from './codex.js';
 import { OpenAIProvider } from './openai.js';
 
-export function createLLMProvider(config: SecureClawConfig): LLMProvider {
+export function createLLMProvider(
+  config: SecureClawConfig,
+  options?: {
+    codexOAuthResolver?: {
+      getValidAccessCredentials(): Promise<{ accessToken: string; accountId: string }>;
+    };
+  },
+): LLMProvider {
   const { provider } = config.llm;
 
   switch (provider) {
@@ -32,10 +39,19 @@ export function createLLMProvider(config: SecureClawConfig): LLMProvider {
       );
 
     case 'codex':
+      if (config.llm.codexAuthMode === 'oauth') {
+        return new CodexProvider({
+          authMode: 'oauth',
+          oauthResolver: options?.codexOAuthResolver,
+          reasoningEffort: config.llm.reasoningEffort,
+        });
+      }
+
       return new CodexProvider({
         apiKey: process.env['OPENAI_API_KEY'],
         baseURL: config.llm.baseURL,
         reasoningEffort: config.llm.reasoningEffort,
+        authMode: 'api-key',
       });
 
     default:

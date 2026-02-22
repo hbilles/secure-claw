@@ -32,6 +32,11 @@ import type {
   HeartbeatToggleRequest,
   HeartbeatToggleResponse,
   HeartbeatTriggered,
+  // Phase 9
+  AuthConnectRequest,
+  AuthStatusRequest,
+  AuthDisconnectRequest,
+  AuthResponse,
 } from '@secureclaw/shared';
 import { SessionManager } from './session.js';
 import { AuditLogger } from './audit.js';
@@ -49,6 +54,7 @@ import { OAuthStore } from './services/oauth.js';
 import { GmailService } from './services/gmail.js';
 import { CalendarService } from './services/calendar.js';
 import { GitHubService } from './services/github.js';
+import { OpenAICodexOAuthService } from './services/openai-codex-oauth.js';
 import { HeartbeatScheduler } from './scheduler.js';
 import { startDashboard, broadcastSSE } from './dashboard.js';
 // Phase 8: MCP server integration
@@ -72,6 +78,11 @@ function isComplexRequest(content: string): boolean {
   // Also check for requests with many conjunctions (and, then, also, with)
   const conjunctions = (lower.match(/\band\b|\bthen\b|\balso\b|\bwith\b/g) || []).length;
   return matchCount >= 1 || conjunctions >= 3;
+}
+
+function maskValue(value: string): string {
+  if (value.length <= 8) return '••••';
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,32 +136,12 @@ async function main(): Promise<void> {
     (message) => socketServer.broadcast(message),
   );
 
-  // Initialize the LLM provider (Anthropic, OpenAI, or LM Studio)
-  const llmProvider = createLLMProvider(config);
-  console.log(`[gateway] LLM provider: ${llmProvider.name} (model: ${config.llm.model})`);
-
-  // Initialize the orchestrator (agentic tool-use loop)
-  const orchestrator = new Orchestrator(llmProvider, dispatcher, hitlGate, auditLogger, config);
-
-  // Attach memory to the orchestrator
-  orchestrator.setMemory(memoryStore, promptBuilder);
-
-  // Phase 7: Initialize DomainManager for dynamic domain whitelisting
-  const domainManager = new DomainManager(config);
-  hitlGate.setDomainManager(domainManager);
-  orchestrator.setDomainManager(domainManager);
-
-  // Wire session expiry cleanup: clear session grants and domain additions
-  sessionManager.onSessionExpired = (userId: string) => {
-    hitlGate.clearSessionGrants(userId);
-    domainManager.clearSessionDomains(userId);
-  };
-
   // Phase 5: Initialize OAuth store and external services
   let oauthStore: OAuthStore | null = null;
   let gmailService: GmailService | null = null;
   let calendarService: CalendarService | null = null;
   let githubService: GitHubService | null = null;
+  let codexOAuthService: OpenAICodexOAuthService | null = null;
 
   try {
     oauthStore = new OAuthStore();
@@ -158,13 +149,25 @@ async function main(): Promise<void> {
     gmailService = new GmailService(oauthStore);
     calendarService = new CalendarService(oauthStore);
     githubService = new GitHubService(oauthStore, config.ownGitHubRepos);
-
-    orchestrator.setServices(gmailService, calendarService, githubService);
+    if (config.oauth?.openaiCodex) {
+      codexOAuthService = new OpenAICodexOAuthService(
+        oauthStore,
+        config.oauth.openaiCodex,
+        (chatId: string, message: string) => {
+          socketServer.broadcast({
+            type: 'notification',
+            chatId,
+            text: message,
+          });
+        },
+      );
+    }
 
     const connected: string[] = [];
     if (gmailService.isConnected()) connected.push('Gmail');
     if (calendarService.isConnected()) connected.push('Calendar');
     if (githubService.isConnected()) connected.push('GitHub');
+    if (codexOAuthService?.isConnected()) connected.push('Codex OAuth');
 
     if (connected.length > 0) {
       console.log(`[gateway] Connected services: ${connected.join(', ')}`);
@@ -176,6 +179,45 @@ async function main(): Promise<void> {
     console.warn(`[gateway] OAuth store not available: ${error.message}`);
     console.warn('[gateway] External services (Gmail, Calendar, GitHub) will be disabled');
   }
+
+  if (
+    config.llm.provider === 'codex' &&
+    config.llm.codexAuthMode === 'oauth' &&
+    !codexOAuthService
+  ) {
+    throw new Error(
+      'Codex OAuth mode requires oauth.openaiCodex configuration and a working OAuth store. ' +
+        'Configure oauth.openaiCodex.clientId and OAUTH_KEY, then restart.',
+    );
+  }
+
+  // Initialize the LLM provider (Anthropic, OpenAI, or LM Studio)
+  const llmProvider = createLLMProvider(config, {
+    codexOAuthResolver: codexOAuthService ?? undefined,
+  });
+  console.log(`[gateway] LLM provider: ${llmProvider.name} (model: ${config.llm.model})`);
+
+  // Initialize the orchestrator (agentic tool-use loop)
+  const orchestrator = new Orchestrator(llmProvider, dispatcher, hitlGate, auditLogger, config);
+
+  // Attach memory to the orchestrator
+  orchestrator.setMemory(memoryStore, promptBuilder);
+
+  // Wire service tools to orchestrator if available
+  if (gmailService && calendarService && githubService) {
+    orchestrator.setServices(gmailService, calendarService, githubService);
+  }
+
+  // Phase 7: Initialize DomainManager for dynamic domain whitelisting
+  const domainManager = new DomainManager(config);
+  hitlGate.setDomainManager(domainManager);
+  orchestrator.setDomainManager(domainManager);
+
+  // Wire session expiry cleanup: clear session grants and domain additions
+  sessionManager.onSessionExpired = (userId: string) => {
+    hitlGate.clearSessionGrants(userId);
+    domainManager.clearSessionDomains(userId);
+  };
 
   // Phase 8: Initialize MCP server integration
   let mcpProxy: McpProxy | null = null;
@@ -314,6 +356,10 @@ async function main(): Promise<void> {
   // Connect audit logger to dashboard SSE for live streaming
   auditLogger.setOnLog((entry) => broadcastSSE('audit', entry));
 
+  const sendAuthResponse = (response: AuthResponse): void => {
+    socketServer.broadcast(response);
+  };
+
   // Handle incoming messages from bridges
   socketServer.on('message', async (data: unknown, reply: (response: unknown) => void, clientId: string) => {
     const raw = data as Record<string, unknown>;
@@ -421,6 +467,170 @@ async function main(): Promise<void> {
         success,
       };
       socketServer.broadcast(response);
+      return;
+    }
+
+    // --- Phase 9: Handle auth control commands from bridge ---
+    if (raw['type'] === 'auth-connect') {
+      const req = data as AuthConnectRequest;
+
+      if (req.service !== 'codex') {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: req.service,
+          action: 'connect',
+          success: false,
+          message: 'Unsupported auth service.',
+        });
+        return;
+      }
+
+      if (!codexOAuthService) {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: 'codex',
+          action: 'connect',
+          success: false,
+          message:
+            'Codex OAuth is not configured. Add oauth.openaiCodex.clientId to config/secureclaw.yaml and restart.',
+        });
+        return;
+      }
+
+      try {
+        if (req.callbackInput && req.callbackInput.trim().length > 0) {
+          await codexOAuthService.completeFromCallbackInput(req.userId, req.callbackInput);
+          sendAuthResponse({
+            type: 'auth-response',
+            chatId: req.chatId,
+            service: 'codex',
+            action: 'connect',
+            success: true,
+            message: '✅ Codex OAuth connected successfully.',
+          });
+        } else {
+          const start = await codexOAuthService.startLogin(req.userId, req.chatId);
+          sendAuthResponse({
+            type: 'auth-response',
+            chatId: req.chatId,
+            service: 'codex',
+            action: 'connect',
+            success: true,
+            message:
+              `Open this URL to authenticate Codex:\n${start.authUrl}\n\n` +
+              `This login expires in ${Math.floor(start.expiresInSeconds / 60)} minute(s).\n` +
+              `After sign-in, if localhost callback fails in your browser, copy the URL from that failed localhost page and run:\n` +
+              '`/connect codex callback <url-or-code>`',
+          });
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: 'codex',
+          action: 'connect',
+          success: false,
+          message: `Codex OAuth connect failed: ${error.message}`,
+        });
+      }
+      return;
+    }
+
+    if (raw['type'] === 'auth-status') {
+      const req = data as AuthStatusRequest;
+      if (req.service !== 'codex') {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: req.service,
+          action: 'status',
+          success: false,
+          message: 'Unsupported auth service.',
+        });
+        return;
+      }
+
+      if (!oauthStore || !codexOAuthService) {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: 'codex',
+          action: 'status',
+          success: false,
+          message: 'Codex OAuth is not configured.',
+        });
+        return;
+      }
+
+      const token = oauthStore.getToken('openai_codex');
+      if (!token) {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: 'codex',
+          action: 'status',
+          success: true,
+          message: 'Codex OAuth status: not connected.',
+        });
+        return;
+      }
+
+      const expiresAt = new Date(token.expiresAt).toISOString();
+      const accountId = token.accountId ? maskValue(token.accountId) : 'unknown';
+      sendAuthResponse({
+        type: 'auth-response',
+        chatId: req.chatId,
+        service: 'codex',
+        action: 'status',
+        success: true,
+        message:
+          `Codex OAuth status: connected\n` +
+          `Account: ${accountId}\n` +
+          `Token expires: ${expiresAt}`,
+      });
+      return;
+    }
+
+    if (raw['type'] === 'auth-disconnect') {
+      const req = data as AuthDisconnectRequest;
+      if (req.service !== 'codex') {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: req.service,
+          action: 'disconnect',
+          success: false,
+          message: 'Unsupported auth service.',
+        });
+        return;
+      }
+
+      if (!codexOAuthService) {
+        sendAuthResponse({
+          type: 'auth-response',
+          chatId: req.chatId,
+          service: 'codex',
+          action: 'disconnect',
+          success: false,
+          message: 'Codex OAuth is not configured.',
+        });
+        return;
+      }
+
+      const removed = codexOAuthService.disconnect();
+      sendAuthResponse({
+        type: 'auth-response',
+        chatId: req.chatId,
+        service: 'codex',
+        action: 'disconnect',
+        success: removed,
+        message: removed
+          ? 'Codex OAuth token removed. Reconnect with /connect codex when needed.'
+          : 'No Codex OAuth token was stored.',
+      });
       return;
     }
 
@@ -636,6 +846,9 @@ async function main(): Promise<void> {
     auditLogger.close();
     approvalStore.close();
     memoryStore.close();
+    if (codexOAuthService) {
+      await codexOAuthService.stop();
+    }
     if (oauthStore) oauthStore.close();
     process.exit(0);
   };

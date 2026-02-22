@@ -45,6 +45,11 @@ import type {
   HeartbeatToggleRequest,
   HeartbeatToggleResponse,
   HeartbeatTriggered,
+  // Phase 9
+  AuthConnectRequest,
+  AuthStatusRequest,
+  AuthDisconnectRequest,
+  AuthResponse,
 } from '@secureclaw/shared';
 
 // ---------------------------------------------------------------------------
@@ -264,6 +269,127 @@ bot.hears(/^\/(heartbeat_enable|heartbeat_disable)\s+(.+)$/i, async (ctx) => {
 });
 
 // ---------------------------------------------------------------------------
+// Phase 9: Auth Commands
+// ---------------------------------------------------------------------------
+
+/**
+ * /connect codex
+ * /connect codex callback <url-or-code>
+ */
+bot.command('connect', async (ctx) => {
+  const userId = ctx.from?.id.toString();
+  if (!userId || !ALLOWED_USER_IDS.has(userId)) return;
+
+  const chatId = ctx.chat.id.toString();
+  const args = (ctx.match ?? '').trim();
+
+  if (!args) {
+    await ctx.reply(
+      [
+        '🔐 Usage:',
+        '`/connect codex`',
+        '`/connect codex callback <url-or-code>`',
+      ].join('\n'),
+      { parse_mode: 'MarkdownV2' },
+    );
+    return;
+  }
+
+  const parts = args.split(/\s+/);
+  const service = parts[0]?.toLowerCase();
+  if (service !== 'codex') {
+    await ctx.reply('⚠️ Supported auth service: `codex`', { parse_mode: 'MarkdownV2' });
+    return;
+  }
+
+  const callbackInput =
+    parts[1]?.toLowerCase() === 'callback'
+      ? args.slice(args.toLowerCase().indexOf('callback') + 'callback'.length).trim()
+      : undefined;
+
+  if (parts[1]?.toLowerCase() === 'callback' && !callbackInput) {
+    await ctx.reply(
+      '⚠️ Usage: `/connect codex callback <url-or-code>`',
+      { parse_mode: 'MarkdownV2' },
+    );
+    return;
+  }
+
+  const request: AuthConnectRequest = {
+    type: 'auth-connect',
+    userId,
+    chatId,
+    service: 'codex',
+    callbackInput,
+  };
+
+  if (socketClient.connected) {
+    socketClient.send(request);
+    console.log('[bridge-telegram] Sent auth-connect request for codex');
+  } else {
+    await ctx.reply('Sorry, I\'m not connected to the gateway right now.');
+  }
+});
+
+/**
+ * /auth_status codex
+ */
+bot.command('auth_status', async (ctx) => {
+  const userId = ctx.from?.id.toString();
+  if (!userId || !ALLOWED_USER_IDS.has(userId)) return;
+
+  const chatId = ctx.chat.id.toString();
+  const service = (ctx.match ?? 'codex').trim().toLowerCase();
+  if (service !== 'codex') {
+    await ctx.reply('⚠️ Supported auth service: `codex`', { parse_mode: 'MarkdownV2' });
+    return;
+  }
+
+  const request: AuthStatusRequest = {
+    type: 'auth-status',
+    userId,
+    chatId,
+    service: 'codex',
+  };
+
+  if (socketClient.connected) {
+    socketClient.send(request);
+    console.log('[bridge-telegram] Sent auth-status request for codex');
+  } else {
+    await ctx.reply('Sorry, I\'m not connected to the gateway right now.');
+  }
+});
+
+/**
+ * /disconnect codex
+ */
+bot.command('disconnect', async (ctx) => {
+  const userId = ctx.from?.id.toString();
+  if (!userId || !ALLOWED_USER_IDS.has(userId)) return;
+
+  const chatId = ctx.chat.id.toString();
+  const service = (ctx.match ?? '').trim().toLowerCase();
+  if (service !== 'codex') {
+    await ctx.reply('⚠️ Usage: `/disconnect codex`', { parse_mode: 'MarkdownV2' });
+    return;
+  }
+
+  const request: AuthDisconnectRequest = {
+    type: 'auth-disconnect',
+    userId,
+    chatId,
+    service: 'codex',
+  };
+
+  if (socketClient.connected) {
+    socketClient.send(request);
+    console.log('[bridge-telegram] Sent auth-disconnect request for codex');
+  } else {
+    await ctx.reply('Sorry, I\'m not connected to the gateway right now.');
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Handle incoming Telegram messages
 // ---------------------------------------------------------------------------
 
@@ -454,6 +580,11 @@ socketClient.on('message', async (data: unknown) => {
 
     case 'heartbeat-triggered':
       await handleHeartbeatTriggered(data as HeartbeatTriggered);
+      return;
+
+    // Phase 9
+    case 'auth-response':
+      await handleAuthResponse(data as AuthResponse);
       return;
 
     default:
@@ -888,6 +1019,19 @@ async function handleHeartbeatTriggered(triggered: HeartbeatTriggered): Promise<
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     console.error('[bridge-telegram] Failed to send heartbeat triggered notification:', error.message);
+  }
+}
+
+/**
+ * Handle auth action responses from the gateway.
+ */
+async function handleAuthResponse(response: AuthResponse): Promise<void> {
+  const { chatId, message } = response;
+  try {
+    await sendFormattedMessage(chatId, message);
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('[bridge-telegram] Failed to send auth response:', error.message);
   }
 }
 

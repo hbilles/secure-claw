@@ -5,3 +5,6 @@ dist/
 *.sock
 *.tsbuildinfo
 .claude
+
+# Local runtime config (contains environment-specific values and may contain secrets)
+config/secureclaw.yaml

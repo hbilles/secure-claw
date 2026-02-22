@@ -24,15 +24,19 @@
 #
 # Codex (OpenAI Responses API):
 #   provider: codex
-#   model: codex-mini-latest       # or gpt-5-codex, gpt-5.1-codex, gpt-5.2-codex, gpt-5.2-2025-12-11
-#   Requires OPENAI_API_KEY env var (same key as OpenAI provider).
+#   model: gpt-5-codex             # Codex OAuth mode requires a Codex model
+#                                  # (e.g., gpt-5-codex, gpt-5.1-codex, gpt-5.2-codex)
+#   Auth mode options:
+#   - codexAuthMode: api-key (default; requires OPENAI_API_KEY)
+#   - codexAuthMode: oauth (requires oauth.openaiCodex.clientId + /connect codex)
 #   Optional: baseURL for compatible endpoints.
 #   Optional: reasoningEffort: low | medium | high
 
 llm:
   provider: codex
-  model: gpt-5.2-2025-12-11
+  model: gpt-5-codex
   maxTokens: 4096
+  codexAuthMode: oauth
 
 executors:
   shell:
@@ -261,3 +265,10 @@ mcpServers:
 #     clientId: your-github-client-id
 #     clientSecret: your-github-client-secret
 #     callbackPort: 9876
+#   openaiCodex:
+#     # Find the current clientId in OpenAI Codex source (CLIENT_ID):
+#     # https://github.com/openai/codex/blob/main/codex-rs/core/src/auth.rs
+#     clientId: your-openai-oauth-client-id
+#     callbackPort: 1455
+#     issuer: https://auth.openai.com
+#     loginTimeoutSeconds: 600

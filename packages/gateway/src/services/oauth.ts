@@ -29,9 +29,15 @@ export interface OAuthTokenData {
   expiresAt: number; // Unix timestamp (ms)
   tokenType: string;
   scope?: string;
+  /** ChatGPT account identifier (required for Codex OAuth mode). */
+  accountId?: string;
+  /** Provider marker for auditing/debugging without exposing credentials. */
+  provider?: 'google' | 'github' | 'openai-codex';
+  /** Encryption-key version for future key rotation workflows. */
+  keyVersion?: number;
 }
 
-export type ServiceName = 'gmail' | 'calendar' | 'github';
+export type ServiceName = 'gmail' | 'calendar' | 'github' | 'openai_codex';
 
 // ---------------------------------------------------------------------------
 // Encryption
@@ -104,25 +110,38 @@ function decrypt(encryptedHex: string, passphrase: string): string {
  * Priority: macOS Keychain > OAUTH_KEY env var
  */
 function getEncryptionKey(): string {
+  const validateKey = (key: string): string => {
+    const bytes = Buffer.byteLength(key, 'utf-8');
+    const normalized = key.trim().toLowerCase();
+    if (bytes < 16 || normalized === 'password' || normalized === 'changeme') {
+      throw new Error(
+        'OAuth encryption key is too weak. ' +
+          'Use at least 16 bytes of high-entropy secret material.',
+      );
+    }
+    return key;
+  };
+
   // Try macOS Keychain first
+  let keychainValue: string | null = null;
   try {
-    const result = execSync(
+    keychainValue = execSync(
       'security find-generic-password -s "secureclaw-oauth" -w 2>/dev/null',
       { encoding: 'utf-8', timeout: 5000 },
     ).trim();
-    if (result) {
-      console.log('[oauth] Using encryption key from macOS Keychain');
-      return result;
-    }
   } catch {
     // Keychain not available or key not stored
+  }
+  if (keychainValue) {
+    console.log('[oauth] Using encryption key from macOS Keychain');
+    return validateKey(keychainValue);
   }
 
   // Fall back to environment variable
   const envKey = process.env['OAUTH_KEY'];
   if (envKey) {
     console.log('[oauth] Using encryption key from OAUTH_KEY environment variable');
-    return envKey;
+    return validateKey(envKey);
   }
 
   throw new Error(

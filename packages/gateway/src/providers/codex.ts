@@ -17,9 +17,13 @@ import type {
   ResponseFunctionToolCall,
   ResponseOutputMessage,
   ResponseOutputText,
-  ResponseOutputItem,
+  ResponseCreateParamsBase,
   ResponseCreateParamsNonStreaming,
 } from 'openai/resources/responses/responses';
+import {
+  CODEX_ACCOUNT_HEADER,
+  CODEX_OAUTH_BASE_URL,
+} from '../services/openai-codex-oauth.js';
 import type {
   LLMProvider,
   LLMResponse,
@@ -31,6 +35,10 @@ import type {
   ToolResultContent,
   StopReason,
 } from '../llm-provider.js';
+
+const DEFAULT_OAUTH_MODEL = 'gpt-5-codex';
+const DEFAULT_OAUTH_INSTRUCTIONS = 'You are SecureClaw. Follow system and user instructions exactly.';
+const CHATGPT_OAUTH_UNSUPPORTED_MODELS = new Set(['codex-mini-latest']);
 
 // ---------------------------------------------------------------------------
 // Translation: Provider-Agnostic → Responses API
@@ -189,23 +197,46 @@ export interface CodexProviderOptions {
   apiKey?: string;
   baseURL?: string;
   reasoningEffort?: 'low' | 'medium' | 'high';
+  authMode?: 'api-key' | 'oauth';
+  oauthResolver?: {
+    getValidAccessCredentials(): Promise<{ accessToken: string; accountId: string }>;
+  };
 }
 
 export class CodexProvider implements LLMProvider {
-  private client: OpenAI;
+  private client: OpenAI | null = null;
   private reasoningEffort?: 'low' | 'medium' | 'high';
+  private authMode: 'api-key' | 'oauth';
+  private oauthResolver?: CodexProviderOptions['oauthResolver'];
   readonly name = 'codex';
 
   constructor(options: CodexProviderOptions = {}) {
+    this.authMode = options.authMode ?? 'api-key';
+    this.reasoningEffort = options.reasoningEffort;
+
+    if (this.authMode === 'oauth') {
+      if (!options.oauthResolver) {
+        throw new Error('Codex OAuth mode requires an OAuth token resolver.');
+      }
+      if (options.baseURL && options.baseURL !== CODEX_OAUTH_BASE_URL) {
+        throw new Error(
+          `Codex OAuth mode enforces base URL ${CODEX_OAUTH_BASE_URL}. ` +
+            'Custom baseURL is not allowed in OAuth mode.',
+        );
+      }
+      this.oauthResolver = options.oauthResolver;
+      return;
+    }
+
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
     if (!apiKey) {
       throw new Error(
-        'Codex provider requires OPENAI_API_KEY. ' +
-          'Set it in your .env file or pass apiKey in provider options.',
+        'Codex provider requires OPENAI_API_KEY in api-key mode. ' +
+          'Set it in your .env file or configure llm.codexAuthMode: oauth.',
       );
     }
+
     this.client = new OpenAI({ apiKey, baseURL: options.baseURL });
-    this.reasoningEffort = options.reasoningEffort;
   }
 
   async chat(params: {
@@ -215,7 +246,33 @@ export class CodexProvider implements LLMProvider {
     messages: ChatMessage[];
     tools: ToolDefinition[];
   }): Promise<LLMResponse> {
+    const client = await this.getClient();
     const input = toCodexInput(params.messages);
+
+    if (this.authMode === 'oauth') {
+      const requestParams: Omit<ResponseCreateParamsBase, 'stream'> = {
+        model: normalizeOauthModel(params.model),
+        instructions: normalizeOauthInstructions(params.system),
+        input,
+        // ChatGPT-backed Codex requires non-persistent responses.
+        store: false,
+      };
+
+      if (params.tools.length > 0) {
+        requestParams.tools = params.tools.map(toCodexTool);
+      }
+
+      if (this.reasoningEffort) {
+        requestParams.reasoning = {
+          effort: this.reasoningEffort,
+        };
+      }
+
+      // ChatGPT-backed Codex requires stream=true; the SDK helper handles SSE and
+      // returns the final accumulated response snapshot.
+      const response = await client.responses.stream(requestParams).finalResponse();
+      return fromCodexResponse(response as OAIResponse);
+    }
 
     const requestParams: ResponseCreateParamsNonStreaming = {
       model: params.model,
@@ -237,8 +294,60 @@ export class CodexProvider implements LLMProvider {
       };
     }
 
-    const response = await this.client.responses.create(requestParams);
-
+    const response = await client.responses.create(requestParams);
     return fromCodexResponse(response as OAIResponse);
   }
+
+  private async getClient(): Promise<OpenAI> {
+    if (this.authMode === 'api-key') {
+      if (!this.client) {
+        throw new Error('Codex provider is not initialized.');
+      }
+      return this.client;
+    }
+
+    if (!this.oauthResolver) {
+      throw new Error('Codex OAuth resolver is not configured.');
+    }
+
+    const credentials = await this.oauthResolver.getValidAccessCredentials();
+    return new OpenAI({
+      apiKey: credentials.accessToken,
+      baseURL: CODEX_OAUTH_BASE_URL,
+      defaultHeaders: {
+        [CODEX_ACCOUNT_HEADER]: credentials.accountId,
+      },
+    });
+  }
+}
+
+function normalizeOauthInstructions(system: string): string {
+  const trimmed = system.trim();
+  return trimmed.length > 0 ? trimmed : DEFAULT_OAUTH_INSTRUCTIONS;
+}
+
+function normalizeOauthModel(model: string): string {
+  const requested = model.trim();
+  if (requested.length === 0) {
+    return DEFAULT_OAUTH_MODEL;
+  }
+
+  const lowered = requested.toLowerCase();
+  if (CHATGPT_OAUTH_UNSUPPORTED_MODELS.has(lowered)) {
+    console.warn(
+      `[codex] Model "${requested}" is not supported in ChatGPT OAuth mode. ` +
+        `Falling back to "${DEFAULT_OAUTH_MODEL}".`,
+    );
+    return DEFAULT_OAUTH_MODEL;
+  }
+
+  if (!lowered.includes('codex')) {
+    console.warn(
+      `[codex] Model "${requested}" is not a Codex model. ` +
+        `ChatGPT OAuth mode requires a Codex model; falling back to "${DEFAULT_OAUTH_MODEL}".`,
+    );
+    return DEFAULT_OAUTH_MODEL;
+  }
+
+  return requested;
 }

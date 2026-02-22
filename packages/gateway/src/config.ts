@@ -61,6 +61,19 @@ export interface OAuthServiceConfig {
   callbackPort: number;
 }
 
+export interface OpenAICodexOAuthConfig {
+  /** OAuth client ID used for the ChatGPT/Codex OAuth flow. */
+  clientId: string;
+  /** Callback port for loopback OAuth redirect (127.0.0.1 only). */
+  callbackPort?: number;
+  /** OAuth issuer origin (defaults to https://auth.openai.com). */
+  issuer?: string;
+  /** Optional workspace restriction for enterprise tenants. */
+  allowedWorkspaceId?: string;
+  /** Pending login expiry timeout in seconds (default: 600). */
+  loginTimeoutSeconds?: number;
+}
+
 /**
  * Configuration for an MCP (Model Context Protocol) server.
  *
@@ -119,6 +132,12 @@ export interface SecureClawConfig {
     baseURL?: string;
     /** Reasoning effort for Codex/o-series models (low, medium, high). */
     reasoningEffort?: 'low' | 'medium' | 'high';
+    /**
+     * Codex auth mode:
+     * - api-key: OPENAI_API_KEY (default for backwards compatibility)
+     * - oauth: ChatGPT OAuth tokens from secure OAuth store
+     */
+    codexAuthMode?: 'api-key' | 'oauth';
   };
   executors: {
     shell: ExecutorConfig;
@@ -141,6 +160,7 @@ export interface SecureClawConfig {
   oauth?: {
     google?: OAuthServiceConfig;
     github?: OAuthServiceConfig;
+    openaiCodex?: OpenAICodexOAuthConfig;
   };
   /** MCP server configurations (optional). */
   mcpServers?: McpServerConfig[];
@@ -231,6 +251,48 @@ export function loadConfig(configPath?: string): SecureClawConfig {
   }
   if (!config.ownGitHubRepos) {
     config.ownGitHubRepos = [];
+  }
+
+  if (config.llm.codexAuthMode !== 'api-key' && config.llm.codexAuthMode !== 'oauth') {
+    config.llm.codexAuthMode = 'api-key';
+  }
+
+  if (
+    config.llm.provider === 'codex' &&
+    config.llm.codexAuthMode === 'oauth' &&
+    !config.llm.model.toLowerCase().includes('codex')
+  ) {
+    console.warn(
+      `[config] WARNING: llm.model "${config.llm.model}" is not a Codex model. ` +
+        'Codex OAuth mode only supports Codex model IDs.',
+    );
+  }
+
+  if (config.oauth?.openaiCodex) {
+    const codexOauth = config.oauth.openaiCodex;
+
+    if (!codexOauth.clientId || codexOauth.clientId.trim().length === 0) {
+      throw new Error('Configuration missing: oauth.openaiCodex.clientId');
+    }
+
+    if (!codexOauth.callbackPort) {
+      codexOauth.callbackPort = 1455;
+    }
+    if (!codexOauth.loginTimeoutSeconds) {
+      codexOauth.loginTimeoutSeconds = 600;
+    }
+    if (!codexOauth.issuer) {
+      codexOauth.issuer = 'https://auth.openai.com';
+    }
+
+    if (codexOauth.callbackPort < 1 || codexOauth.callbackPort > 65535) {
+      throw new Error('Configuration invalid: oauth.openaiCodex.callbackPort must be 1-65535');
+    }
+    if (codexOauth.loginTimeoutSeconds < 30 || codexOauth.loginTimeoutSeconds > 3600) {
+      throw new Error(
+        'Configuration invalid: oauth.openaiCodex.loginTimeoutSeconds must be 30-3600',
+      );
+    }
   }
 
   // Defaults for Phase 8 (MCP servers)

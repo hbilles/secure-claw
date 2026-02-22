@@ -118,7 +118,8 @@ secure-claw/
 │           └── capability-token.ts  # JWT mint/verify for capability tokens
 │
 ├── config/
-│   └── secureclaw.yaml      # LLM, executor, mount, HITL, heartbeat, OAuth config
+│   ├── secureclaw.example.yaml  # Committed template config
+│   └── secureclaw.yaml          # Local runtime config (gitignored)
 ├── docker-compose.yml        # Gateway + Bridge as services; executors built but not run
 ├── .env.example              # Required environment variables
 └── package.json              # npm workspaces monorepo root
@@ -294,7 +295,7 @@ Every event is logged to an append-only JSONL audit log: messages received, LLM 
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token
 ALLOWED_USER_IDS=123456789         # Comma-separated Telegram user IDs
 ANTHROPIC_API_KEY=sk-ant-...        # For anthropic provider
-OPENAI_API_KEY=sk-...               # For openai or codex provider
+OPENAI_API_KEY=sk-...               # For openai provider and codex api-key mode
 CAPABILITY_SECRET=random-secret    # Signs executor capability tokens
 OAUTH_KEY=encryption-passphrase   # Optional — encrypts OAuth tokens at rest
 MCP_PROXY_PORT=0                  # Optional — MCP proxy listen port (0 = OS-assigned)
@@ -304,13 +305,15 @@ MCP_PROXY_PORT=0                  # Optional — MCP proxy listen port (0 = OS-a
 
 Controls the entire system:
 
-- **`llm`** — Provider, model, and token limits. Supported providers: `anthropic` (default), `openai`, `lmstudio`, `codex`. The Codex provider uses OpenAI's Responses API to access Codex models (e.g., `codex-mini-latest`, `gpt-5-codex`, `gpt-5.2-codex`) and supports an optional `reasoningEffort` setting.
+`config/secureclaw.yaml` is local runtime config (gitignored). Start from `config/secureclaw.example.yaml`.
+
+- **`llm`** — Provider, model, and token limits. Supported providers: `anthropic` (default), `openai`, `lmstudio`, `codex`. The Codex provider uses OpenAI's Responses API and supports optional `reasoningEffort` and `codexAuthMode` (`api-key` or `oauth`). In `oauth` mode, use a Codex model ID (for example `gpt-5-codex`, `gpt-5.1-codex`, or `gpt-5.2-codex`).
 - **`executors`** — Per-executor image, memory/CPU limits, timeouts, output caps. The web executor also specifies its domain allowlist and `resultFormat` (`structured` or `legacy`) here.
 - **`mounts`** — Host directory → container path mappings with read/write permissions. These define what the file and shell executors can see.
 - **`actionTiers`** — HITL classification rules. Ordered lists of tool + condition patterns for `autoApprove`, `notify`, and `requireApproval`.
 - **`trustedDomains`** — Base domains that downgrade `browse_web` from require-approval to notify tier. Additional domains can be approved dynamically at runtime — when the agent visits an unlisted domain, the user is prompted to allow it for the session.
 - **`heartbeats`** — Cron schedules for proactive agent triggers with prompt templates.
-- **`oauth`** — Google and GitHub OAuth client credentials for service integrations.
+- **`oauth`** — Google, GitHub, and Codex OAuth client credentials for service integrations.
 - **`mcpServers`** — MCP server definitions. Each entry specifies a Docker image, command, optional allowed domains (for network access through the proxy), environment variables (`"from_env"` resolves from host env), mounts, resource limits, a `defaultTier` for HITL classification, and tool filters (`includeTools`, `excludeTools`, `maxTools`).
 
 ## Getting Started
@@ -328,6 +331,7 @@ Controls the entire system:
 git clone <repo-url> && cd secure-claw
 npm install
 cp .env.example .env
+cp config/secureclaw.example.yaml config/secureclaw.yaml
 # Edit .env with your tokens and secrets
 # Edit config/secureclaw.yaml to configure mounts and HITL rules
 ```
@@ -367,16 +371,23 @@ Available at `http://127.0.0.1:3333` when the gateway is running. Provides:
 | `/sessions` | Show active and recent task sessions |
 | `/stop` | Cancel the current multi-step task |
 | `/heartbeats` | List and toggle heartbeat schedules |
+| `/connect codex` | Start Codex OAuth login |
+| `/connect codex callback <url-or-code>` | Complete Codex OAuth login manually |
+| `/auth_status codex` | Show Codex OAuth connection status |
+| `/disconnect codex` | Remove stored Codex OAuth token |
 
 ### OAuth Setup (optional)
 
-To enable Gmail, Calendar, or GitHub integrations:
+To enable service integrations and Codex OAuth:
 
-1. Create OAuth credentials in the Google Cloud Console / GitHub Developer Settings
-2. Add the client ID and secret to `config/secureclaw.yaml` under the `oauth` key
-3. Start the system — the gateway exposes a temporary callback server on `localhost:9876`
-4. Use the OAuth flow URL logged at startup to authorize each service
-5. Tokens are stored encrypted (AES-256-GCM) using the `OAUTH_KEY` env var, or in macOS Keychain if available
+1. Configure the relevant credentials in `config/secureclaw.yaml` under `oauth`:
+   - `oauth.google` / `oauth.github` for service tools
+   - `oauth.openaiCodex.clientId` for Codex OAuth mode
+2. Set a strong `OAUTH_KEY` (or macOS Keychain entry) for token encryption-at-rest.
+3. If using Codex OAuth, set `llm.codexAuthMode: oauth` and `llm.model` to a Codex model ID (for example `gpt-5-codex`).
+4. Start SecureClaw, then run `/connect codex` in Telegram and open the returned URL.
+5. If callback routing is blocked (e.g., VPS/remote browser), copy the final redirected URL and run:
+   - `/connect codex callback <url-or-code>`
 
 ## Tech Stack
 

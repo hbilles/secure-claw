@@ -38,7 +38,10 @@ services:
     ports:
       # Phase 5: Web dashboard (localhost-only)
       - "127.0.0.1:3333:3333"
-      # Phase 5: OAuth callback (temporary, for initial setup only)
+      # OAuth callback ports (localhost-only)
+      # - 1455: Codex OAuth callback
+      # - 9876: legacy/other OAuth callback flows
+      - "127.0.0.1:1455:1455"
       - "127.0.0.1:9876:9876"
     # Allow the gateway container to reach services on the Docker host
     # (e.g., LM Studio at host.docker.internal:1234).
